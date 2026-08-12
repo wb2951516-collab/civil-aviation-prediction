@@ -182,7 +182,57 @@ class TreeviewTooltip:
         self._last_iid = None
 
 
-APP_WINDOW_TITLE = "民航旅客运输量预测系统 (最终版)"
+APP_WINDOW_TITLE = "民航旅客运输量预测系统"
+
+
+def _screen_geometry(win, width: int, height: int, parent=None, margin: int = 48, min_w: int = 320, min_h: int = 240):
+    """计算自适应窗口几何：尺寸不超屏幕可用区域，相对父窗口居中（无父窗口则屏幕居中）。
+
+    配合 SetProcessDpiAwareness 后，winfo_screenwidth/height 返回逻辑像素，
+    在 100%/125%/150% DPI 缩放下均能正确适配。
+    """
+    try:
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+    except Exception:
+        screen_w, screen_h = 1920, 1080
+    w = max(int(min_w), min(int(width), max(int(min_w), screen_w - margin)))
+    h = max(int(min_h), min(int(height), max(int(min_h), screen_h - margin)))
+
+    # 相对父窗口居中（父窗口偏移 + 1/2 差值），并保证落在屏幕内
+    if parent is not None:
+        try:
+            if parent.winfo_exists():
+                px = parent.winfo_rootx()
+                py = parent.winfo_rooty()
+                pw = parent.winfo_width()
+                ph = parent.winfo_height()
+                if pw > 0 and ph > 0:
+                    x = px + (pw - w) // 2
+                    y = py + (ph - h) // 3
+                    x = max(0, min(x, screen_w - w))
+                    y = max(0, min(y, screen_h - h))
+                    return f"{w}x{h}+{x}+{y}", w, h
+        except Exception:
+            pass
+
+    x = max(0, (screen_w - w) // 2)
+    y = max(0, (screen_h - h) // 2)
+    return f"{w}x{h}+{x}+{y}", w, h
+
+
+def _apply_geometry(win, width: int, height: int, parent=None, margin: int = 48, min_w: int = 320, min_h: int = 240):
+    """为 Toplevel 弹窗应用自适应几何：居中 + 最小/最大尺寸约束（可拖动）。"""
+    geo, w, h = _screen_geometry(win, width, height, parent, margin, min_w, min_h)
+    try:
+        win.geometry(geo)
+        win.minsize(int(min_w), int(min_h))
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        win.maxsize(max(int(min_w), screen_w - 16), max(int(min_h), screen_h - 16))
+    except Exception:
+        pass
+    return geo
 
 
 def _try_activate_existing_window() -> bool:
@@ -250,8 +300,19 @@ class FinalForecastApp:
             self.root.report_callback_exception = self._handle_tk_exception
         except Exception:
             pass
-        self.root.title("民航旅客运输量预测系统 (最终版)")
-        self.root.geometry("1400x900")
+        self.root.title("民航旅客运输量预测系统")
+        # 基于屏幕可用区域自适应初始尺寸并居中（兼容 100%/125%/150% DPI）
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            win_w = min(1400, max(960, int(screen_w * 0.88)))
+            win_h = min(900, max(640, int(screen_h * 0.88)))
+            x = max(0, (screen_w - win_w) // 2)
+            y = max(0, (screen_h - win_h) // 2)
+            self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
+            self.root.minsize(960, 640)
+        except Exception:
+            self.root.geometry("1400x900")
 
         # 应用现代化主题
         try:
@@ -523,10 +584,10 @@ class FinalForecastApp:
         help_btn = ttk.Button(title_frame, text="❓ 帮助", width=8, command=self.show_help_info)
         help_btn.pack(side=tk.RIGHT, anchor=tk.N, padx=10)
 
-        tk.Label(title_frame, text="民航旅客运输量预测系统 (最终版)",
+        tk.Label(title_frame, text="民航旅客运输量预测系统",
                  font=('微软雅黑', 20, 'bold'), bg='#f0f0f0').pack()
 
-        tk.Label(title_frame, text="春运比例拆分 + 年度增长率校准 + 精选算法集成 (V1.1)",
+        tk.Label(title_frame, text="春运比例拆分 + 年度增长率校准 + 精选算法集成 (V1.2)",
                  font=('微软雅黑', 11), bg='#f0f0f0', fg='#666').pack()
 
         # 控制面板（卡片化分组）
@@ -1141,7 +1202,7 @@ class FinalForecastApp:
         """手动录入数据窗口"""
         input_window = tk.Toplevel(self.root)
         input_window.title("手动录入数据")
-        input_window.geometry("400x300")
+        _apply_geometry(input_window, 400, 320, parent=self.root, min_w=360, min_h=280)
 
         tk.Label(input_window, text="录入新数据", font=('微软雅黑', 14, 'bold')).pack(pady=10)
 
@@ -1474,7 +1535,7 @@ class FinalForecastApp:
 
             win = tk.Toplevel(self.root)
             win.title("春运时间预览")
-            win.geometry("900x500")
+            _apply_geometry(win, 900, 520, parent=self.root, min_w=640, min_h=400)
 
             top = tk.Frame(win)
             top.pack(fill=tk.X, padx=10, pady=10)
@@ -2139,7 +2200,7 @@ class FinalForecastApp:
                     # 写入说明
                     df_description = pd.DataFrame({
                         '说明': [
-                            '数据来源：民航旅客运输量预测系统 V1.1',
+                            '数据来源：民航旅客运输量预测系统 V1.2',
                             f'导出时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
                             f'预测模型：{self.model_var.get()}',
                             f'年度增长率：{self.lunar_config["annual_growth_rate"] * 100:.2f}%',
@@ -2272,7 +2333,7 @@ class FinalForecastApp:
                 with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
                     # 1. 封面
                     cover_df = pd.DataFrame({
-                        '民航旅客运输量预测分析报告 (最终版)': [
+                        '民航旅客运输量预测分析报告': [
                             '',
                             f'报告生成时间：{datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}',
                             f'历史数据量：{len(self.data)} 条',
@@ -2580,7 +2641,7 @@ class FinalForecastApp:
         """管理控制台：自动接入官方渠道数据源（GDP / ASK）并纳入预测"""
         win = tk.Toplevel(self.root)
         win.title("管理控制台 - 官方数据源接入")
-        win.geometry("880x640")
+        _apply_geometry(win, 880, 660, parent=self.root, min_w=680, min_h=520)
         win.configure(bg=T_COLORS["bg_window"])
         win.transient(self.root)
 
@@ -2721,7 +2782,7 @@ class FinalForecastApp:
         """算法使用手册：点击查看（含已移除算法说明）"""
         win = tk.Toplevel(self.root)
         win.title("算法使用手册")
-        win.geometry("980x680")
+        _apply_geometry(win, 980, 700, parent=self.root, min_w=720, min_h=520)
         win.configure(bg=T_COLORS["bg_window"])
         win.transient(self.root)
 
@@ -2790,7 +2851,7 @@ class FinalForecastApp:
 
             win = tk.Toplevel(self.root)
             win.title("状态转移分析（马尔可夫情景分析）")
-            win.geometry("880x600")
+            _apply_geometry(win, 880, 620, parent=self.root, min_w=680, min_h=480)
             win.configure(bg=T_COLORS["bg_window"])
             win.transient(self.root)
 
