@@ -52,3 +52,6 @@ desktop.ini
 logs/
 .cache/
 *.tmp
+
+# ===== 评估输出 =====
+eval_*.txt
