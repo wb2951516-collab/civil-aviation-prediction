@@ -216,6 +216,43 @@ def main():
     print(f"旧固定权重:     HW={w_legacy2['hw']:.3f}  SARIMA={w_legacy2['sarima']:.3f}")
     print(f"兼容接口权重:   {recommend_weights_from_backtest(bt_new)}")
 
+    # ---------- 5) 稳健性分析 ----------
+    print("\n" + "-" * 78)
+    print("5) 稳健性分析（多训练窗口 / 分阶段 / Ljung-Box 残差检验）")
+    print("-" * 78)
+    print("5.1 多训练窗口滚动回测 MAPE%:")
+    for mw in (24, 36, 48):
+        bt = rolling_backtest(ts, profile, horizon=12, step=12, min_train=mw, factors=None)
+        s = bt.get("summary", {})
+        rec = bt.get("recommendation", {})
+        print(f"  min_train={mw}: HW {s.get('hw', {}).get('mape', float('nan')):.2f}% | "
+              f"SARIMA {s.get('sarima', {}).get('mape', float('nan')):.2f}% | "
+              f"融合 {s.get('ensemble', {}).get('mape', float('nan')):.2f}% | "
+              f"推荐 {rec.get('model')}")
+
+    print("5.2 分阶段对比（2020 疫情前后）:")
+    ts_pre = ts[ts.index < "2020-01-01"]
+    ts_post = ts[ts.index >= "2020-01-01"]
+    for label, part in (("2020之前(2015-2019)", ts_pre), ("2020之后(2020-2025)", ts_post)):
+        if len(part) < 36:
+            print(f"  {label}: 数据不足")
+            continue
+        bt = rolling_backtest(part, profile, horizon=12, step=12, min_train=24, factors=None)
+        s = bt.get("summary", {})
+        rec = bt.get("recommendation", {})
+        print(f"  {label}: HW {s.get('hw', {}).get('mape', float('nan')):.2f}% | "
+              f"SARIMA {s.get('sarima', {}).get('mape', float('nan')):.2f}% | "
+              f"融合 {s.get('ensemble', {}).get('mape', float('nan')):.2f}% | "
+              f"推荐 {rec.get('model')} | 窗口数 {len(bt.get('windows', []))}")
+
+    print("5.3 Ljung-Box 残差自相关检验（主回测，p>0.05 表示残差无显著自相关）:")
+    lb = bt_new.get("lb_tests", {})
+    for k, name in (("hw", "HW"), ("sarima", "SARIMA"), ("ensemble", "融合")):
+        r = lb.get(k, {})
+        p = r.get("lb_pvalue", float("nan"))
+        verdict = "通过(无自相关)" if (p == p and p > 0.05) else ("未通过(存在自相关)" if p == p else "样本不足")
+        print(f"  {name}: stat={r.get('lb_stat', float('nan')):.2f} p={p:.4f} -> {verdict}")
+
     print("\n" + "=" * 78)
     print("对比结论：MAPE 越低越好；MDA 为方向命中率；Theil U<1 表示优于朴素基准。")
     print("=" * 78)

@@ -23,6 +23,29 @@ class MetricResult:
     theil_u: float
 
 
+def ljung_box_test(errors, lags: int = 12) -> Dict[str, float]:
+    """Ljung-Box 残差自相关检验（H0：残差无自相关）。
+
+    返回统计量与 p 值；p < 0.05 提示残差仍含未建模的自相关结构。
+    """
+    e = np.asarray(errors, dtype=float)
+    e = e[np.isfinite(e)]
+    if len(e) < max(4, lags + 1):
+        return {"lb_stat": float("nan"), "lb_pvalue": float("nan"), "lb_n": len(e)}
+    try:
+        from statsmodels.stats.diagnostic import acorr_ljungbox
+
+        lag = max(1, min(int(lags), len(e) // 2 - 1))
+        res = acorr_ljungbox(e, lags=[lag], return_df=True)
+        return {
+            "lb_stat": float(res["lb_stat"].iloc[0]),
+            "lb_pvalue": float(res["lb_pvalue"].iloc[0]),
+            "lb_n": len(e),
+        }
+    except Exception:
+        return {"lb_stat": float("nan"), "lb_pvalue": float("nan"), "lb_n": len(e)}
+
+
 def _metrics(y_true, y_pred) -> MetricResult:
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
@@ -204,6 +227,7 @@ def rolling_backtest(
         "windows": [(a.strftime("%Y-%m"), b.strftime("%Y-%m")) for a, b in windows],
         "summary": summary,
         "errors": merged_errors,
+        "lb_tests": {k: ljung_box_test(v) for k, v in merged_errors.items()},
         "recommendation": _recommend_model(summary, merged_errors),
     }
 
@@ -283,6 +307,7 @@ def holdout_backtest(
         "test_range": (test.index[0].strftime("%Y-%m"), test.index[-1].strftime("%Y-%m")),
         "summary": summary_dict,
         "errors": errors,
+        "lb_tests": {k: ljung_box_test(v) for k, v in errors.items()},
         "recommendation": _recommend_model(summary_dict, errors),
     }
 

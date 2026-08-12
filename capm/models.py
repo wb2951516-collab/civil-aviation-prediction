@@ -116,6 +116,7 @@ def sarima_forecast(
 ) -> ForecastOutput:
     import warnings
 
+    import numpy as np
     import pandas as pd
     from statsmodels.tsa.statespace.sarimax import SARIMAX
 
@@ -171,6 +172,24 @@ def sarima_forecast(
     idx = _future_month_index(ts, periods)
     pred = best_res.forecast(steps=int(periods), exog=exog_future)
     pred = pd.Series(pred.values, index=idx).clip(lower=0.0)
+
+    # 95% 预测置信区间（供图表置信带展示）
+    try:
+        pred_res = best_res.get_prediction(
+            start=len(ts),
+            end=len(ts) + int(periods) - 1,
+            exog=exog_future,
+            dynamic=False,
+        )
+        ci = pred_res.conf_int(alpha=0.05)
+        ci_values = np.asarray(ci, dtype=float)
+        conf = pd.DataFrame(ci_values, index=idx, columns=["lower", "upper"]).clip(lower=0.0)
+        conf = conf[conf["lower"].notna() & conf["upper"].notna()]
+        if len(conf):
+            best_meta["conf_int"] = conf
+    except Exception:
+        pass
+
     return ForecastOutput(pred, best_meta)
 
 

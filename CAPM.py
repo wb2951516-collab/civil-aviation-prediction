@@ -1644,6 +1644,9 @@ class FinalForecastApp:
                 except Exception:
                     model_type = "ensemble"
 
+            # 每次预测前清空置信带（由 SARIMA 路径填充）
+            self.model_conf_int = None
+
             # 根据选择的模型进行预测
             if model_type == "ensemble":
                 forecast = self.ensemble_forecast(ts, factors)
@@ -1781,6 +1784,7 @@ class FinalForecastApp:
             "SARIMA": components["SARIMA"].forecast,
             "Ensemble": out.forecast,
         }
+        self.model_conf_int = components["SARIMA"].meta.get("conf_int")
         return out.forecast
 
     def holt_winters_forecast(self, ts):
@@ -1793,6 +1797,7 @@ class FinalForecastApp:
             seasonal_periods=int(hw_cfg.get("seasonal_periods", 12)),
             auto_tune=bool(self.hw_auto_var.get()) if hasattr(self, "hw_auto_var") else bool(hw_cfg.get("auto_tune", False)),
         )
+        self.model_conf_int = None  # HW 无置信区间
         return out.forecast
 
     def sarima_forecast(self, ts, factors=None):
@@ -1807,6 +1812,7 @@ class FinalForecastApp:
             exog=exog_train,
             exog_future=exog_future,
         )
+        self.model_conf_int = out.meta.get("conf_int")
         return out.forecast
 
     def simple_seasonal_forecast(self, ts):
@@ -1913,6 +1919,19 @@ class FinalForecastApp:
         if len(history) > 0 and len(forecast) > 0:
             boundary = forecast.index[0]
             self.forecast_ax.axvline(boundary, color=T_COLORS["border"], linestyle='--', linewidth=1.2, alpha=0.9)
+
+        # 置信带（SARIMA 95% 预测区间）
+        conf = getattr(self, "model_conf_int", None)
+        if conf is not None and len(conf):
+            try:
+                lower = conf["lower"].reindex(forecast.index)
+                upper = conf["upper"].reindex(forecast.index)
+                if lower.notna().any() and upper.notna().any():
+                    self.forecast_ax.fill_between(lower.index, lower.values, upper.values,
+                                                  color=T_COLORS["primary_light"], alpha=0.15,
+                                                  label='SARIMA 95%区间')
+            except Exception:
+                pass
 
         # 如果有多模型结果，绘制对比
         if hasattr(self, 'model_results') and self.model_results:
@@ -2332,36 +2351,37 @@ class FinalForecastApp:
         tick_size = max(7, int(round(8 * scale)))
 
         # 1. 原始时间序列
-        self.analysis_axs[0, 0].plot(ts.index, ts.values, 'b-', linewidth=1.5)
-        self.analysis_axs[0, 0].set_title('原始时间序列', fontsize=title_size)
+        self.analysis_axs[0, 0].plot(ts.index, ts.values, color=T_COLORS["primary"], linewidth=1.8)
+        self.analysis_axs[0, 0].set_title('原始时间序列', fontsize=title_size, fontweight='bold')
         self.analysis_axs[0, 0].set_xlabel('日期', fontsize=label_size)
         self.analysis_axs[0, 0].set_ylabel('旅客运输量', fontsize=label_size)
         self.analysis_axs[0, 0].tick_params(labelsize=tick_size)
-        self.analysis_axs[0, 0].grid(True, alpha=0.3)
+        self.analysis_axs[0, 0].grid(True, alpha=0.25, color=T_COLORS["border"])
 
         # 2. 季节性分解
-        self.analysis_axs[0, 1].plot(decomposition.trend.index, decomposition.trend.values, 'g-', linewidth=1.5)
-        self.analysis_axs[0, 1].set_title('趋势成分', fontsize=title_size)
+        self.analysis_axs[0, 1].plot(decomposition.trend.index, decomposition.trend.values, color=T_COLORS["success"], linewidth=1.8)
+        self.analysis_axs[0, 1].set_title('趋势成分', fontsize=title_size, fontweight='bold')
         self.analysis_axs[0, 1].set_xlabel('日期', fontsize=label_size)
         self.analysis_axs[0, 1].set_ylabel('趋势', fontsize=label_size)
         self.analysis_axs[0, 1].tick_params(labelsize=tick_size)
-        self.analysis_axs[0, 1].grid(True, alpha=0.3)
+        self.analysis_axs[0, 1].grid(True, alpha=0.25, color=T_COLORS["border"])
 
         # 3. 季节性成分
-        self.analysis_axs[1, 0].plot(decomposition.seasonal.index, decomposition.seasonal.values, 'r-', linewidth=1.5)
-        self.analysis_axs[1, 0].set_title('季节性成分', fontsize=title_size)
+        self.analysis_axs[1, 0].plot(decomposition.seasonal.index, decomposition.seasonal.values, color=T_COLORS["accent"], linewidth=1.8)
+        self.analysis_axs[1, 0].set_title('季节性成分', fontsize=title_size, fontweight='bold')
         self.analysis_axs[1, 0].set_xlabel('日期', fontsize=label_size)
         self.analysis_axs[1, 0].set_ylabel('季节性', fontsize=label_size)
         self.analysis_axs[1, 0].tick_params(labelsize=tick_size)
-        self.analysis_axs[1, 0].grid(True, alpha=0.3)
+        self.analysis_axs[1, 0].grid(True, alpha=0.25, color=T_COLORS["border"])
 
         # 4. 残差
-        self.analysis_axs[1, 1].plot(decomposition.resid.index, decomposition.resid.values, 'k-', linewidth=1)
-        self.analysis_axs[1, 1].set_title('残差成分', fontsize=title_size)
+        self.analysis_axs[1, 1].plot(decomposition.resid.index, decomposition.resid.values, color=T_COLORS["text_sub"], linewidth=1.2)
+        self.analysis_axs[1, 1].axhline(0, color=T_COLORS["border"], linewidth=0.8, linestyle='--')
+        self.analysis_axs[1, 1].set_title('残差成分', fontsize=title_size, fontweight='bold')
         self.analysis_axs[1, 1].set_xlabel('日期', fontsize=label_size)
         self.analysis_axs[1, 1].set_ylabel('残差', fontsize=label_size)
         self.analysis_axs[1, 1].tick_params(labelsize=tick_size)
-        self.analysis_axs[1, 1].grid(True, alpha=0.3)
+        self.analysis_axs[1, 1].grid(True, alpha=0.25, color=T_COLORS["border"])
 
         # 调整布局
         self.analysis_fig.tight_layout()
