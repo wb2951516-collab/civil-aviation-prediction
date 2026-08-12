@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CAPM
+Comment=民航旅客运输量预测系统
+Exec=/usr/bin/capm
+Icon=capm
+Terminal=false
+Categories=Office;Science;

@@ -1,0 +1,8 @@
+Package: capm
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Your Company <dev@example.com>
+Description: CAPM 民航旅客运输量预测系统
+Depends: libc6 (>= 2.27)

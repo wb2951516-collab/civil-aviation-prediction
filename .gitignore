@@ -1,0 +1,54 @@
+# ===== Python 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Python 构建产物 =====
+build/
+dist/
+dist_installers/
+*.egg-info/
+*.egg
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# ===== 打包产物 =====
+*.exe
+*.msi
+
+# ===== 媒体与渲染产物 =====
+media/
+*.mp4
+*.mov
+*.avi
+*.mkv
+frames/
+
+# ===== 前端依赖 =====
+node_modules/
+remotion-project/node_modules/
+remotion-project/build/
+remotion-project/out/
+
+# ===== IDE 与工具配置 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+.trae/
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 日志与缓存 =====
+*.log
+logs/
+.cache/
+*.tmp
