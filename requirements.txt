@@ -4,3 +4,4 @@ statsmodels
 matplotlib
 openpyxl
 zhdate
+akshare

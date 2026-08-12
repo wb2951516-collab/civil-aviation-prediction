@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="CAPM",
-    version="1.0.0",
+    version="1.1.0",
     packages=find_packages(),
     py_modules=["CAPM"],
     install_requires=[
@@ -12,6 +12,7 @@ setup(
         "matplotlib",
         "openpyxl",
         "zhdate",
+        "akshare",
     ],
     entry_points={
         "console_scripts": [

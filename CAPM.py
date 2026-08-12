@@ -29,6 +29,7 @@ warnings.filterwarnings('ignore')
 
 from capm.backtest import recommend_weights_from_backtest, rolling_backtest
 from capm.config_store import ConfigStore
+from capm.datasource import ExternalDataManager
 from capm.growth import apply_annual_growth_adjustment
 from capm.holiday import (
     apply_holiday_effects,
@@ -37,8 +38,12 @@ from capm.holiday import (
     compute_spring_travel_span,
     get_spring_festival_date,
 )
-from capm.models import ensemble_forecast, holt_winters_forecast, linear_forecast, sarima_forecast, simple_seasonal_forecast
 from capm.logging_setup import configure_logging
+from capm.manuals import MANUALS, REMOVED_NOTES
+from capm.markov import analyze_regimes
+from capm.models import ensemble_forecast, holt_winters_forecast, sarima_forecast, simple_seasonal_forecast
+from capm.theme import COLORS as T_COLORS
+from capm.theme import apply_theme, card_frame
 
 
 REQUIRED_MODULES = [
@@ -247,10 +252,21 @@ class FinalForecastApp:
         self.root.title("民航旅客运输量预测系统 (最终版)")
         self.root.geometry("1400x900")
 
+        # 应用现代化主题
+        try:
+            apply_theme(self.root)
+        except Exception:
+            pass
+
         # 初始化数据
         self.data = None
         self.forecast_data = None
         self.model_results = {}
+
+        # 外部数据源（GDP / ASK 管理控制台）
+        self.external_mgr = ExternalDataManager()
+        self.external_enabled = True          # 外部因子是否参与预测（管理控制台开关）
+        self.external_status_text = "外部数据未加载"
 
         self.config_store = ConfigStore()
         self.config = self.config_store.load()
@@ -386,12 +402,22 @@ class FinalForecastApp:
             self._fonts["tree_heading"].configure(size=heading_size)
             self._fonts["toolbar"].configure(size=max(9, int(round(10 * scale))))
 
-        # 配置 Treeview 样式，增加行高
-        self.style.configure("Forecast.Treeview", font=self._fonts["tree"], rowheight=row_height)
+        # 配置 Treeview 样式，增加行高（现代化外观）
+        self.style.configure("Forecast.Treeview", font=self._fonts["tree"], rowheight=row_height,
+                              background=T_COLORS["bg_card"], fieldbackground=T_COLORS["bg_card"],
+                              foreground=T_COLORS["text_main"], borderwidth=0)
+        self.style.map("Forecast.Treeview", background=[("selected", T_COLORS["selected"])],
+                       foreground=[("selected", T_COLORS["text_main"])])
         # 增加表头内边距和字体
-        self.style.configure("Forecast.Treeview.Heading", font=self._fonts["tree_heading"], padding=(int(10*scale), int(8*scale)))
-        self.style.configure("Forecast.Horizontal.TScale", padding=(mode_pad, 0))
-        self.style.configure("Forecast.TLabel", font=self._fonts["toolbar"])
+        self.style.configure("Forecast.Treeview.Heading", font=self._fonts["tree_heading"],
+                              padding=(int(10*scale), int(8*scale)),
+                              background="#E8EDF5", foreground=T_COLORS["text_main"],
+                              borderwidth=0, relief="flat")
+        self.style.map("Forecast.Treeview.Heading", background=[("active", "#DDE6F2")])
+        self.style.configure("Forecast.Horizontal.TScale", padding=(mode_pad, 0),
+                              background=T_COLORS["bg_window"], troughcolor="#D8DEE8",
+                              bordercolor=T_COLORS["border"])
+        self.style.configure("Forecast.TLabel", font=self._fonts["toolbar"], background=T_COLORS["bg_window"])
 
         # 文本框字体缩放
         text_font_size = max(9, int(round(10 * scale)))
@@ -499,40 +525,46 @@ class FinalForecastApp:
         tk.Label(title_frame, text="民航旅客运输量预测系统 (最终版)",
                  font=('微软雅黑', 20, 'bold'), bg='#f0f0f0').pack()
 
-        tk.Label(title_frame, text="春运比例拆分 + 2.7%年度固定增长率 + 农历优化",
-                 font=('微软雅黑', 12), bg='#f0f0f0', fg='#666').pack()
+        tk.Label(title_frame, text="春运比例拆分 + 年度增长率校准 + 精选算法集成 (V1.1)",
+                 font=('微软雅黑', 11), bg='#f0f0f0', fg='#666').pack()
 
-        # 控制面板
-        control_frame = tk.Frame(self.root, bg='#f0f0f0')
-        control_frame.pack(fill=tk.X, padx=20, pady=5)
+        # 控制面板（卡片化分组）
+        control_frame = tk.Frame(self.root, bg=T_COLORS["bg_window"])
+        control_frame.pack(fill=tk.X, padx=14, pady=(2, 8))
 
-        # 左侧控制按钮
-        left_buttons = tk.Frame(control_frame, bg='#f0f0f0')
-        left_buttons.pack(side=tk.LEFT)
+        # ---- 左侧：数据操作区 ----
+        left_buttons = card_frame(control_frame, "数据操作")
+        left_buttons.pack(side=tk.LEFT, fill=tk.X)
 
-        ttk.Button(left_buttons, text="导入Excel数据",
-                   command=self.import_data).pack(side=tk.LEFT, padx=2)
-        ttk.Button(left_buttons, text="手动录入数据",
-                   command=self.manual_input).pack(side=tk.LEFT, padx=2)
-        ttk.Button(left_buttons, text="数据预处理",
-                   command=self.data_preprocessing).pack(side=tk.LEFT, padx=2)
+        ttk.Button(left_buttons, text="导入Excel数据", style="Modern.TButton",
+                   command=self.import_data).pack(side=tk.LEFT, padx=4, pady=4)
+        ttk.Button(left_buttons, text="手动录入数据", style="Secondary.TButton",
+                   command=self.manual_input).pack(side=tk.LEFT, padx=4, pady=4)
+        ttk.Button(left_buttons, text="数据预处理", style="Secondary.TButton",
+                   command=self.data_preprocessing).pack(side=tk.LEFT, padx=4, pady=4)
+        ttk.Button(left_buttons, text="管理控制台", style="Modern.TButton",
+                   command=self.open_admin_console).pack(side=tk.LEFT, padx=4, pady=4)
 
-        # 右侧模型选择
-        right_controls = tk.Frame(control_frame, bg='#f0f0f0')
+        # ---- 右侧：模型与预测区 ----
+        right_controls = card_frame(control_frame, "模型与预测")
         right_controls.pack(side=tk.RIGHT)
 
-        tk.Label(right_controls, text="模型选择:", bg='#f0f0f0').pack(side=tk.LEFT, padx=5)
-
+        # 精选算法集合（V1.1：线性回归已移除，详见算法手册）
         self.model_var = tk.StringVar(value="ensemble")
-        models = [("融合模型", "ensemble"), ("Holt-Winters", "hw"),
-                  ("SARIMA", "sarima"), ("线性回归", "linear")]
-
+        models = [("融合模型", "ensemble"), ("Holt-Winters", "hw"), ("SARIMA", "sarima")]
         for text, value in models:
             ttk.Radiobutton(right_controls, text=text, variable=self.model_var,
-                            value=value).pack(side=tk.LEFT, padx=2)
+                            value=value).pack(side=tk.LEFT, padx=3, pady=4)
 
-        ttk.Button(right_controls, text="运行预测",
-                   command=self.run_forecast).pack(side=tk.LEFT, padx=5)
+        # 模式：自动推荐（默认）/ 手动选择
+        self.model_mode_var = tk.StringVar(value="auto")
+        ttk.Checkbutton(right_controls, text="自动推荐", variable=self.model_mode_var,
+                        onvalue="auto", offvalue="manual").pack(side=tk.LEFT, padx=(8, 2), pady=4)
+
+        ttk.Button(right_controls, text="运行预测", style="Modern.TButton",
+                   command=self.run_forecast).pack(side=tk.LEFT, padx=6, pady=4)
+        ttk.Button(right_controls, text="算法手册", style="Toolbar.TButton",
+                   command=self.open_manual_viewer).pack(side=tk.LEFT, padx=2, pady=4)
 
         # 主内容区域
         main_notebook = ttk.Notebook(self.root)
@@ -606,7 +638,7 @@ class FinalForecastApp:
         
         # 绑定拖拽和斑马纹
         self._bind_drag_scroll(self.history_tree)
-        self.history_tree.tag_configure("odd", background="#FBFDFF")
+        self.history_tree.tag_configure("odd", background=T_COLORS["row_alt"])
         self.history_tree.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel_zoom, add="+")
 
         # 右侧：数据统计和导出
@@ -667,33 +699,31 @@ class FinalForecastApp:
         ttk.Checkbutton(config_frame, text="启用节假日效应",
                         variable=self.holiday_var).pack(anchor=tk.W, pady=2)
 
-        # 权重配置
-        weight_frame = tk.Frame(config_frame, bg='#f9f9f9')
+        # 权重配置（精选集合：Holt-Winters / SARIMA）
+        weight_frame = tk.Frame(config_frame, bg=T_COLORS["bg_card"])
         weight_frame.pack(fill=tk.X, pady=5)
 
-        tk.Label(weight_frame, text="模型权重:", bg='#f9f9f9').pack(side=tk.LEFT, padx=5)
+        tk.Label(weight_frame, text="融合权重:", bg=T_COLORS["bg_card"]).pack(side=tk.LEFT, padx=5)
 
-        tk.Label(weight_frame, text="HW:", bg='#f9f9f9').pack(side=tk.LEFT, padx=5)
+        tk.Label(weight_frame, text="HW:", bg=T_COLORS["bg_card"]).pack(side=tk.LEFT, padx=5)
         weights = self.model_cfg.get("weights", {}) if isinstance(self.model_cfg.get("weights", {}), dict) else {}
-        self.hw_weight_var = tk.DoubleVar(value=float(weights.get("hw", 0.4)))
-        ttk.Spinbox(weight_frame, from_=0.0, to=1.0, increment=0.1,
+        self.hw_weight_var = tk.DoubleVar(value=float(weights.get("hw", 0.5)))
+        ttk.Spinbox(weight_frame, from_=0.0, to=1.0, increment=0.05,
                     textvariable=self.hw_weight_var, width=5).pack(side=tk.LEFT, padx=2)
 
-        tk.Label(weight_frame, text="SARIMA:", bg='#f9f9f9').pack(side=tk.LEFT, padx=5)
-        self.sarima_weight_var = tk.DoubleVar(value=float(weights.get("sarima", 0.3)))
-        ttk.Spinbox(weight_frame, from_=0.0, to=1.0, increment=0.1,
+        tk.Label(weight_frame, text="SARIMA:", bg=T_COLORS["bg_card"]).pack(side=tk.LEFT, padx=5)
+        self.sarima_weight_var = tk.DoubleVar(value=float(weights.get("sarima", 0.5)))
+        ttk.Spinbox(weight_frame, from_=0.0, to=1.0, increment=0.05,
                     textvariable=self.sarima_weight_var, width=5).pack(side=tk.LEFT, padx=2)
 
-        tk.Label(weight_frame, text="线性:", bg='#f9f9f9').pack(side=tk.LEFT, padx=5)
-        self.linear_weight_var = tk.DoubleVar(value=float(weights.get("linear", 0.3)))
-        ttk.Spinbox(weight_frame, from_=0.0, to=1.0, increment=0.1,
-                    textvariable=self.linear_weight_var, width=5).pack(side=tk.LEFT, padx=2)
+        tk.Label(weight_frame, text="(权重自动归一化，回测可推荐)", bg=T_COLORS["bg_card"],
+                 fg=T_COLORS["text_sub"]).pack(side=tk.LEFT, padx=8)
 
-        advanced_frame = tk.Frame(config_frame, bg="#f9f9f9")
+        advanced_frame = tk.Frame(config_frame, bg=T_COLORS["bg_card"])
         advanced_frame.pack(fill=tk.X, pady=5)
 
-        weight_mode = self.model_cfg.get("weight_mode", "manual")
-        self.weight_mode_var = tk.StringVar(value=weight_mode if weight_mode in ["manual", "auto"] else "manual")
+        weight_mode = self.model_cfg.get("weight_mode", "auto")
+        self.weight_mode_var = tk.StringVar(value=weight_mode if weight_mode in ["manual", "auto"] else "auto")
         ttk.Radiobutton(advanced_frame, text="手动权重", variable=self.weight_mode_var, value="manual").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(advanced_frame, text="自动权重(回测)", variable=self.weight_mode_var, value="auto").pack(side=tk.LEFT, padx=5)
 
@@ -705,7 +735,10 @@ class FinalForecastApp:
         self.hw_auto_var = tk.BooleanVar(value=bool(hw_cfg.get("auto_tune", False)))
         ttk.Checkbutton(advanced_frame, text="HW自动调参", variable=self.hw_auto_var).pack(side=tk.LEFT, padx=10)
 
-        ttk.Button(advanced_frame, text="模型回测评估", command=self.run_backtest).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(advanced_frame, text="模型回测评估", style="Secondary.TButton",
+                   command=self.run_backtest).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(advanced_frame, text="状态转移分析", style="Secondary.TButton",
+                   command=self.open_regime_analysis).pack(side=tk.RIGHT, padx=5)
 
     def create_forecast_tab(self, notebook):
         """创建预测结果标签页"""
@@ -774,10 +807,10 @@ class FinalForecastApp:
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
-        self.forecast_tree.tag_configure("odd", background="#FBFDFF")
-        self.forecast_tree.tag_configure("spring", background="#FFF7E6")
-        self.forecast_tree.tag_configure("pos", foreground="#1A7F37")
-        self.forecast_tree.tag_configure("neg", foreground="#D1242F")
+        self.forecast_tree.tag_configure("odd", background=T_COLORS["row_alt"])
+        self.forecast_tree.tag_configure("spring", background=T_COLORS["row_spring"])
+        self.forecast_tree.tag_configure("pos", foreground=T_COLORS["success"])
+        self.forecast_tree.tag_configure("neg", foreground=T_COLORS["danger"])
 
         self.forecast_tooltip = TreeviewTooltip(self.forecast_tree, self._forecast_tooltip_text)
         self.forecast_tree.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel_zoom, add="+")
@@ -964,11 +997,10 @@ class FinalForecastApp:
            - 季节性效应：冬季运输高峰
            - 春运效应：基于春节日期动态计算
 
-        4. 多模型融合：
+        4. 精选算法融合：
            - Holt-Winters：季节性指数平滑
-           - SARIMA：时间序列分析
-           - 线性回归：趋势预测
-           - 融合模型：加权平均优化结果
+           - SARIMA/SARIMAX：时间序列分析（可接入 GDP/ASK 外生因子）
+           - 融合模型：加权平均优化结果（线性回归已移除，详见算法手册）
         """
 
         info_text.insert(1.0, config_info)
@@ -1187,7 +1219,7 @@ class FinalForecastApp:
                 self.model_cfg.setdefault("weights", {})
                 self.model_cfg["weights"]["hw"] = float(self.hw_weight_var.get())
                 self.model_cfg["weights"]["sarima"] = float(self.sarima_weight_var.get())
-                self.model_cfg["weights"]["linear"] = float(self.linear_weight_var.get())
+                self.model_cfg["weights"].pop("linear", None)
 
             if hasattr(self, "weight_mode_var"):
                 self.model_cfg["weight_mode"] = str(self.weight_mode_var.get())
@@ -1343,7 +1375,7 @@ class FinalForecastApp:
         if hasattr(self, "hw_weight_var"):
             model_cfg["weights"]["hw"] = float(self.hw_weight_var.get())
             model_cfg["weights"]["sarima"] = float(self.sarima_weight_var.get())
-            model_cfg["weights"]["linear"] = float(self.linear_weight_var.get())
+            model_cfg["weights"].pop("linear", None)
 
         model_cfg.setdefault("sarima", {})
         if hasattr(self, "sarima_auto_var"):
@@ -1397,13 +1429,12 @@ class FinalForecastApp:
 
         weights = self.model_cfg.get("weights", {}) if isinstance(self.model_cfg.get("weights", {}), dict) else {}
         if hasattr(self, "hw_weight_var"):
-            self.hw_weight_var.set(float(weights.get("hw", 0.4)))
-            self.sarima_weight_var.set(float(weights.get("sarima", 0.3)))
-            self.linear_weight_var.set(float(weights.get("linear", 0.3)))
+            self.hw_weight_var.set(float(weights.get("hw", 0.5)))
+            self.sarima_weight_var.set(float(weights.get("sarima", 0.5)))
 
         if hasattr(self, "weight_mode_var"):
-            wm = self.model_cfg.get("weight_mode", "manual")
-            self.weight_mode_var.set(wm if wm in ["manual", "auto"] else "manual")
+            wm = self.model_cfg.get("weight_mode", "auto")
+            self.weight_mode_var.set(wm if wm in ["manual", "auto"] else "auto")
 
         if hasattr(self, "sarima_auto_var"):
             sarima_cfg = self.model_cfg.get("sarima", {}) if isinstance(self.model_cfg.get("sarima", {}), dict) else {}
@@ -1565,7 +1596,7 @@ class FinalForecastApp:
             raise ValueError("无法创建时间序列，日期数据无效")
 
     def run_forecast(self):
-        """执行预测"""
+        """执行预测（自动推荐 / 手动选择双模式，支持外部因子）"""
         if self.data is None or len(self.data) < 12:
             messagebox.showwarning("警告", "至少需要12个月的历史数据才能进行预测")
             return
@@ -1576,34 +1607,55 @@ class FinalForecastApp:
             # 准备时间序列
             ts = self.prepare_time_series()
 
-            # 根据选择的模型进行预测
-            model_type = self.model_var.get()
+            # 外部宏观/行业因子（管理控制台接入）
+            factors = None
+            if self.external_enabled:
+                try:
+                    factors = self.external_mgr.get_monthly_factors(ts.index, periods=12)
+                except Exception:
+                    factors = None
 
+            # 模式：auto = 自动推荐（回测驱动）；manual = 手动选择
+            mode = str(getattr(self, "model_mode_var", tk.StringVar(value="auto")).get() or "auto")
+            model_type = str(self.model_var.get())
+            rec_info = None
+
+            if mode == "auto":
+                try:
+                    profile = self.collect_profile_from_ui() if hasattr(self, "collect_profile_from_ui") else dict(self.profile)
+                    profile.setdefault("spring_festival_dates", dict(self.spring_festival_dates))
+                    bt = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors) if len(ts) >= 24 else {"error": "历史数据不足"}
+                    if "error" not in bt:
+                        rec = bt.get("recommendation") or {}
+                        model_type = str(rec.get("model", "ensemble"))
+                        weights = rec.get("weights") or recommend_weights_from_backtest(bt)
+                        self.hw_weight_var.set(round(float(weights.get("hw", 0.5)), 4))
+                        self.sarima_weight_var.set(round(float(weights.get("sarima", 0.5)), 4))
+                        self.model_cfg.setdefault("weights", {})
+                        self.model_cfg["weights"].update({k: float(v) for k, v in weights.items()})
+                        rec_info = {
+                            "model": model_type,
+                            "weights": {k: round(float(v), 4) for k, v in weights.items()},
+                            "method": rec.get("weight_method", "回测"),
+                            "summary": bt.get("summary", {}),
+                        }
+                    else:
+                        model_type = "ensemble"
+                except Exception:
+                    model_type = "ensemble"
+
+            # 根据选择的模型进行预测
             if model_type == "ensemble":
-                if hasattr(self, "weight_mode_var") and str(self.weight_mode_var.get()) == "auto":
-                    try:
-                        profile = self.collect_profile_from_ui() if hasattr(self, "collect_profile_from_ui") else dict(self.profile)
-                        profile.setdefault("spring_festival_dates", dict(self.spring_festival_dates))
-                        ts_bt = ts
-                        bt = rolling_backtest(ts_bt, profile, horizon=12, step=12, min_train=24) if len(ts_bt) >= 24 else {"error": "历史数据不足"}
-                        if "error" not in bt:
-                            weights = recommend_weights_from_backtest(bt)
-                            self.hw_weight_var.set(round(weights["hw"], 4))
-                            self.sarima_weight_var.set(round(weights["sarima"], 4))
-                            self.linear_weight_var.set(round(weights["linear"], 4))
-                            self.model_cfg.setdefault("weights", {})
-                            self.model_cfg["weights"].update(weights)
-                    except Exception:
-                        pass
-                forecast = self.ensemble_forecast(ts)
+                forecast = self.ensemble_forecast(ts, factors)
             elif model_type == "hw":
                 forecast = self.holt_winters_forecast(ts)
             elif model_type == "sarima":
-                forecast = self.sarima_forecast(ts)
-            elif model_type == "linear":
-                forecast = self.linear_forecast(ts)
+                forecast = self.sarima_forecast(ts, factors)
             else:
-                forecast = self.ensemble_forecast(ts)
+                forecast = self.ensemble_forecast(ts, factors)
+
+            # 记录预测决策信息（供报告/展示）
+            self.last_rec_info = rec_info
 
             # 应用农历假日效应
             forecast = self.apply_lunar_holiday_effects(forecast)
@@ -1617,7 +1669,10 @@ class FinalForecastApp:
             # 显示预测图表
             self.plot_forecast(ts, forecast)
 
-            self.update_status("预测完成")
+            if rec_info is not None:
+                self.update_status(f"预测完成（自动推荐：{rec_info['model']}，权重方法：{rec_info['method']}）")
+            else:
+                self.update_status("预测完成")
 
         except Exception as e:
             logging.exception("预测失败")
@@ -1630,6 +1685,13 @@ class FinalForecastApp:
             return
         try:
             ts = self.prepare_time_series()
+
+            factors = None
+            if self.external_enabled:
+                try:
+                    factors = self.external_mgr.get_monthly_factors(ts.index, periods=12)
+                except Exception:
+                    factors = None
 
             profile = dict(self.profile)
             holiday_cfg = dict(profile.get("holiday", {}))
@@ -1649,7 +1711,7 @@ class FinalForecastApp:
             profile["growth"] = growth_cfg
             profile["model"] = model_cfg
 
-            result = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24)
+            result = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors)
             if "error" in result:
                 messagebox.showerror("回测失败", str(result["error"]))
                 return
@@ -1658,26 +1720,51 @@ class FinalForecastApp:
             self.model_cfg.setdefault("weights", {})
             self.model_cfg["weights"].update(weights)
             if hasattr(self, "hw_weight_var"):
-                self.hw_weight_var.set(round(weights["hw"], 4))
-                self.sarima_weight_var.set(round(weights["sarima"], 4))
-                self.linear_weight_var.set(round(weights["linear"], 4))
+                self.hw_weight_var.set(round(float(weights.get("hw", 0.5)), 4))
+                self.sarima_weight_var.set(round(float(weights.get("sarima", 0.5)), 4))
 
             summary = result.get("summary", {})
+            rec = result.get("recommendation") or {}
             text = "回测评估(滚动12个月)：\n\n"
-            for k, name in [("hw", "Holt-Winters"), ("sarima", "SARIMA"), ("linear", "线性回归")]:
+            for k, name in [("hw", "Holt-Winters"), ("sarima", "SARIMA"), ("ensemble", "融合模型")]:
                 s = summary.get(k, {})
-                text += f"{name} - MAPE: {s.get('mape', float('nan')):.2f}%, RMSE: {s.get('rmse', float('nan')):.2f}, MAE: {s.get('mae', float('nan')):.2f}\n"
-            text += "\n推荐权重(基于MAPE倒数归一化)：\n"
-            text += f"HW={weights['hw']:.3f}, SARIMA={weights['sarima']:.3f}, 线性={weights['linear']:.3f}\n"
+                text += f"{name} - MAPE: {s.get('mape', float('nan')):.2f}%, RMSE: {s.get('rmse', float('nan')):.2f}, "
+                text += f"MDA: {s.get('mda', float('nan')):.2f}, TheilU: {s.get('theil_u', float('nan')):.2f}\n"
+            text += f"\n推荐模型：{rec.get('model', 'ensemble')}（权重方法：{rec.get('weight_method', '回测')}）\n"
+            text += f"推荐权重：HW={weights.get('hw', 0.5):.3f}, SARIMA={weights.get('sarima', 0.5):.3f}\n"
+            text += f"\n说明：MAPE 越低越好；MDA 为方向命中率（越高越好）；Theil U<1 表示优于朴素基准。"
 
             messagebox.showinfo("模型回测评估", text)
         except Exception as e:
             messagebox.showerror("回测失败", str(e))
 
-    def ensemble_forecast(self, ts):
-        weights = {"hw": float(self.hw_weight_var.get()), "sarima": float(self.sarima_weight_var.get()), "linear": float(self.linear_weight_var.get())}
+    def _prepare_exog(self, ts, factors, periods: int = 12):
+        """将月度因子拆分为训练期与预测期外生变量（与 SARIMAX 对齐）"""
+        if factors is None or len(ts) == 0:
+            return None, None
+        try:
+            idx = ts.index
+            train = factors.reindex(idx)
+            if train.isna().any().any():
+                train = train.ffill().bfill()
+                if train.isna().any().any():
+                    return None, None
+            last = pd.Timestamp(idx[-1]).to_period("M").to_timestamp()
+            fut = pd.date_range(start=(last.to_period("M") + 1).to_timestamp(), periods=int(periods), freq="MS")
+            fut_f = factors.reindex(fut)
+            if fut_f.isna().any().any():
+                fut_f = fut_f.ffill().bfill()
+                if fut_f.isna().any().any():
+                    return None, None
+            return train, fut_f
+        except Exception:
+            return None, None
+
+    def ensemble_forecast(self, ts, factors=None):
+        weights = {"hw": float(self.hw_weight_var.get()), "sarima": float(self.sarima_weight_var.get())}
         sarima_cfg = self.model_cfg.get("sarima", {}) if isinstance(self.model_cfg.get("sarima", {}), dict) else {}
         hw_cfg = self.model_cfg.get("holt_winters", {}) if isinstance(self.model_cfg.get("holt_winters", {}), dict) else {}
+        exog_train, exog_future = self._prepare_exog(ts, factors)
         out, components = ensemble_forecast(
             ts,
             weights=weights,
@@ -1686,11 +1773,12 @@ class FinalForecastApp:
             sarima_params={"order": sarima_cfg.get("order", [1, 1, 1]), "seasonal_order": sarima_cfg.get("seasonal_order", [1, 1, 1, 12])},
             hw_params={"trend": hw_cfg.get("trend", "add"), "seasonal": hw_cfg.get("seasonal", "add"), "seasonal_periods": hw_cfg.get("seasonal_periods", 12)},
             periods=12,
+            exog=exog_train,
+            exog_future=exog_future,
         )
         self.model_results = {
             "Holt-Winters": components["Holt-Winters"].forecast,
             "SARIMA": components["SARIMA"].forecast,
-            "Linear": components["Linear"].forecast,
             "Ensemble": out.forecast,
         }
         return out.forecast
@@ -1707,13 +1795,18 @@ class FinalForecastApp:
         )
         return out.forecast
 
-    def sarima_forecast(self, ts):
+    def sarima_forecast(self, ts, factors=None):
         sarima_cfg = self.model_cfg.get("sarima", {}) if isinstance(self.model_cfg.get("sarima", {}), dict) else {}
-        out = sarima_forecast(ts, periods=12, order=tuple(sarima_cfg.get("order", (1, 1, 1))), seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))), auto_tune=bool(self.sarima_auto_var.get()) if hasattr(self, "sarima_auto_var") else bool(sarima_cfg.get("auto_tune", False)))
-        return out.forecast
-
-    def linear_forecast(self, ts):
-        out = linear_forecast(ts, periods=12)
+        exog_train, exog_future = self._prepare_exog(ts, factors)
+        out = sarima_forecast(
+            ts,
+            periods=12,
+            order=tuple(sarima_cfg.get("order", (1, 1, 1))),
+            seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
+            auto_tune=bool(self.sarima_auto_var.get()) if hasattr(self, "sarima_auto_var") else bool(sarima_cfg.get("auto_tune", False)),
+            exog=exog_train,
+            exog_future=exog_future,
+        )
         return out.forecast
 
     def simple_seasonal_forecast(self, ts):
@@ -1809,21 +1902,26 @@ class FinalForecastApp:
         legend_size = max(8, int(round(9 * scale)))
 
         # 绘制历史数据
-        self.forecast_ax.plot(history.index, history.values, 'b-',
-                              label='历史数据', linewidth=2, marker='o', markersize=max(4, 6*scale))
+        self.forecast_ax.plot(history.index, history.values, color=T_COLORS["primary"],
+                              label='历史数据', linewidth=2.2, marker='o', markersize=max(4, 6*scale))
 
         # 绘制预测数据
-        self.forecast_ax.plot(forecast.index, forecast.values, 'r--',
-                              label='预测数据', linewidth=2, marker='s', markersize=max(4, 6*scale))
+        self.forecast_ax.plot(forecast.index, forecast.values, color=T_COLORS["danger"],
+                              label='预测数据', linewidth=2.2, marker='s', markersize=max(4, 6*scale))
+
+        # 历史/预测分界
+        if len(history) > 0 and len(forecast) > 0:
+            boundary = forecast.index[0]
+            self.forecast_ax.axvline(boundary, color=T_COLORS["border"], linestyle='--', linewidth=1.2, alpha=0.9)
 
         # 如果有多模型结果，绘制对比
         if hasattr(self, 'model_results') and self.model_results:
-            colors = ['g', 'm', 'c', 'y']
+            colors = [T_COLORS["primary_light"], T_COLORS["accent"]]
             for idx, (model_name, model_forecast) in enumerate(self.model_results.items()):
                 if model_name != 'Ensemble':
                     self.forecast_ax.plot(model_forecast.index, model_forecast.values,
                                           color=colors[idx % len(colors)], linestyle=':',
-                                          linewidth=1, label=f'{model_name}模型', alpha=0.7)
+                                          linewidth=1.4, label=f'{model_name}模型', alpha=0.85)
 
         # 标记春运月份
         if hasattr(self, 'spring_festival_info') and self.spring_festival_info:
@@ -1845,11 +1943,14 @@ class FinalForecastApp:
         model_name = {
             'ensemble': '融合模型',
             'hw': 'Holt-Winters',
-            'sarima': 'SARIMA',
-            'linear': '线性回归'
+            'sarima': 'SARIMA'
         }.get(self.model_var.get(), '融合模型')
-
-        self.forecast_ax.set_title(f'旅客运输量预测 ({model_name}) - 最终版', fontsize=title_size, fontweight='bold')
+        mode = str(getattr(self, "model_mode_var", tk.StringVar(value="auto")).get() or "auto")
+        mode_text = "自动推荐" if mode == "auto" else "手动选择"
+        title = f'旅客运输量预测 ({model_name} · {mode_text})'
+        if getattr(self, "last_rec_info", None):
+            title += f" · 回测推荐权重 HW {self.last_rec_info['weights'].get('hw', 0.5):.2f}/SA {self.last_rec_info['weights'].get('sarima', 0.5):.2f}"
+        self.forecast_ax.set_title(title, fontsize=title_size, fontweight='bold')
         self.forecast_ax.tick_params(axis="both", labelsize=tick_size)
         self.forecast_ax.legend(loc='best', fontsize=legend_size)
         self.forecast_ax.grid(True, alpha=0.3)
@@ -1885,12 +1986,12 @@ class FinalForecastApp:
                     # 写入说明
                     df_description = pd.DataFrame({
                         '说明': [
-                            '数据来源：民航旅客运输量预测系统 (最终版)',
+                            '数据来源：民航旅客运输量预测系统 V1.1',
                             f'导出时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
                             f'预测模型：{self.model_var.get()}',
                             f'年度增长率：{self.lunar_config["annual_growth_rate"] * 100:.2f}%',
                             f'启用节假日效应：{"是" if self.holiday_var.get() else "否"}',
-                            '注：春运天数基于农历春节日期计算，年度增长率固定为2.7%'
+                            '注：春运天数基于农历春节日期计算；精选算法集合见“算法手册”',
                         ]
                     })
                     df_description.to_excel(writer, sheet_name='说明', index=False)
@@ -2318,6 +2419,275 @@ class FinalForecastApp:
                 self.forecast_canvas.draw()
 
             self.update_status("数据已清空")
+
+    # ========== 管理控制台：官方数据源接入 ==========
+
+    def open_admin_console(self):
+        """管理控制台：自动接入官方渠道数据源（GDP / ASK）并纳入预测"""
+        win = tk.Toplevel(self.root)
+        win.title("管理控制台 - 官方数据源接入")
+        win.geometry("880x640")
+        win.configure(bg=T_COLORS["bg_window"])
+        win.transient(self.root)
+
+        header = card_frame(win, "数据源接入说明")
+        header.pack(fill=tk.X, padx=12, pady=(12, 4))
+        tk.Label(header, text="自动接入国家统计局（GDP）与民航行业（ASK 可用座公里）数据，"
+                              "接入后作为外生变量参与 SARIMAX 预测计算。",
+                 bg=T_COLORS["bg_card"], fg=T_COLORS["text_sub"]).pack(anchor="w", padx=8, pady=2)
+        tk.Label(header, text="离线时自动降级为内置参考数据，并在此标注实际来源。",
+                 bg=T_COLORS["bg_card"], fg=T_COLORS["text_sub"]).pack(anchor="w", padx=8, pady=(0, 4))
+
+        # ---- 数据源状态表 ----
+        status_card = card_frame(win, "数据源状态")
+        status_card.pack(fill=tk.X, padx=12, pady=6)
+        cols = ("指标", "来源", "数据量", "最新日期", "最新值", "更新时间", "状态")
+        self.admin_tree = ttk.Treeview(status_card, columns=cols, show="headings", height=3, style="Modern.Treeview")
+        widths = {"指标": 120, "来源": 160, "数据量": 70, "最新日期": 100, "最新值": 100, "更新时间": 150, "状态": 70}
+        for c in cols:
+            self.admin_tree.heading(c, text=c)
+            self.admin_tree.column(c, width=widths[c], anchor=tk.CENTER)
+        vsb = ttk.Scrollbar(status_card, orient=tk.VERTICAL, command=self.admin_tree.yview, style="Modern.Vertical.TScrollbar")
+        self.admin_tree.configure(yscrollcommand=vsb.set)
+        self.admin_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=6)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=6)
+
+        def refresh_status():
+            try:
+                for item in self.admin_tree.get_children():
+                    self.admin_tree.delete(item)
+                for row in self.external_mgr.status():
+                    latest = row.get("最新值")
+                    latest_text = f"{latest:,.1f}" if latest is not None else "-"
+                    self.admin_tree.insert("", "end", values=(
+                        row["指标"], row["来源"], row["数据量"], row["最新日期"],
+                        latest_text, row["更新时间"], row["状态"],
+                    ))
+            except Exception:
+                pass
+
+        # ---- 底部操作区 ----
+        bottom = tk.Frame(win, bg=T_COLORS["bg_window"])
+        bottom.pack(fill=tk.X, padx=12, pady=6)
+        self.external_enabled_var = tk.BooleanVar(value=bool(self.external_enabled))
+        ttk.Checkbutton(bottom, text="接入预测（GDP/ASK 参与预测计算）",
+                        variable=self.external_enabled_var,
+                        command=self._toggle_external).pack(side=tk.LEFT)
+
+        update_btn = ttk.Button(bottom, text="一键更新数据", style="Modern.TButton")
+        update_btn.pack(side=tk.LEFT, padx=10)
+        ttk.Button(bottom, text="清理缓存", style="Danger.TButton",
+                   command=self._admin_clear_cache).pack(side=tk.LEFT)
+        self.admin_status_label = tk.Label(bottom, text=self.external_status_text,
+                                           bg=T_COLORS["bg_window"], fg=T_COLORS["text_sub"])
+        self.admin_status_label.pack(side=tk.RIGHT)
+
+        # ---- 指标趋势预览 ----
+        preview_card = card_frame(win, "指标趋势预览（近 5 年）")
+        preview_card.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8.6, 3.6), sharex=True)
+        canvas = FigureCanvasTkAgg(fig, master=preview_card)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        def draw_preview():
+            try:
+                data = self.external_mgr.load()
+                gdp = data["gdp"]["gdp"].iloc[-60:]
+                ask = data["ask"]["ask"].iloc[-60:]
+                ax1.clear(); ax2.clear()
+                ax1.plot(gdp.index, gdp.values, color=T_COLORS["primary"], linewidth=1.8, label="GDP（亿元）")
+                ax1.set_ylabel("GDP（亿元）", fontsize=9); ax1.legend(fontsize=8); ax1.grid(alpha=0.25)
+                ax2.plot(ask.index, ask.values, color=T_COLORS["primary_light"], linewidth=1.8, label="ASK（亿座公里）")
+                ax2.set_ylabel("ASK（亿座公里）", fontsize=9); ax2.legend(fontsize=8); ax2.grid(alpha=0.25)
+                for ax in (ax1, ax2):
+                    ax.tick_params(labelsize=8)
+                fig.tight_layout()
+                canvas.draw()
+            except Exception:
+                pass
+
+        def do_update():
+            update_btn.configure(state="disabled", text="正在更新...")
+
+            def worker():
+                try:
+                    res = self.external_mgr.refresh(use_akshare=True)
+                except Exception as e:
+                    res = {"error": str(e)}
+
+                def done():
+                    try:
+                        update_btn.configure(state="normal", text="一键更新数据")
+                        refresh_status()
+                        draw_preview()
+                        if "error" in res:
+                            self.admin_status_label.configure(text=f"更新失败: {res['error']}", fg=T_COLORS["danger"])
+                        else:
+                            src = f"GDP: {'在线' if res.get('gdp_ok') else '内置'} | ASK: {'在线' if res.get('ask_ok') else '内置'}"
+                            self.admin_status_label.configure(text=f"更新完成 {res.get('refreshed_at', '')} | {src}", fg=T_COLORS["success"])
+                            self.external_status_text = f"外部数据已更新 ({src})"
+                            self.update_status(self.external_status_text)
+                    except Exception:
+                        pass
+
+                try:
+                    win.after(0, done)
+                except Exception:
+                    pass
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        update_btn.configure(command=do_update)
+        refresh_status()
+        draw_preview()
+        self.update_status("管理控制台已打开")
+
+    def _toggle_external(self):
+        """外部因子接入预测开关"""
+        self.external_enabled = bool(self.external_enabled_var.get()) if hasattr(self, "external_enabled_var") else self.external_enabled
+        self.external_status_text = "外部数据已启用" if self.external_enabled else "外部数据已停用"
+        self.update_status(self.external_status_text)
+
+    def _admin_clear_cache(self):
+        if not messagebox.askyesno("确认", "确定要清空外部数据缓存吗？\n清空后将恢复为内置参考数据。"):
+            return
+        try:
+            self.external_mgr.clear_cache()
+            if hasattr(self, "admin_tree"):
+                for item in self.admin_tree.get_children():
+                    self.admin_tree.delete(item)
+            self.update_status("外部数据缓存已清空")
+            messagebox.showinfo("成功", "缓存已清空，当前使用内置参考数据")
+        except Exception as e:
+            messagebox.showerror("错误", str(e))
+
+    # ========== 算法使用手册 ==========
+
+    def open_manual_viewer(self):
+        """算法使用手册：点击查看（含已移除算法说明）"""
+        win = tk.Toplevel(self.root)
+        win.title("算法使用手册")
+        win.geometry("980x680")
+        win.configure(bg=T_COLORS["bg_window"])
+        win.transient(self.root)
+
+        main = tk.Frame(win, bg=T_COLORS["bg_window"])
+        main.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+
+        # 左侧：算法列表
+        left = card_frame(main, "算法列表")
+        left.pack(side=tk.LEFT, fill=tk.Y)
+        list_tree = ttk.Treeview(left, columns=("name",), show="headings", height=8, style="Modern.Treeview")
+        list_tree.heading("name", text="算法")
+        list_tree.column("name", width=240, anchor=tk.W)
+        list_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        list_tree.tag_configure("removed", foreground=T_COLORS["danger"])
+
+        # 右侧：手册内容
+        right = card_frame(main, "手册详情")
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        title_label = tk.Label(right, text="", font=("微软雅黑", 13, "bold"),
+                               bg=T_COLORS["bg_card"], fg=T_COLORS["primary"], anchor="w")
+        title_label.pack(fill=tk.X, padx=10, pady=(8, 2))
+        text = scrolledtext.ScrolledText(right, wrap=tk.WORD, font=("微软雅黑", 10), padx=12, pady=8)
+        text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        text.configure(state="disabled")
+
+        def show_manual(item):
+            try:
+                if not item:
+                    return
+                values = list_tree.item(item, "values")
+                if not values:
+                    return
+                title_label.configure(text=str(values[0]))
+                idx = int(item)
+                content = MANUALS[idx]["content"] if idx < len(MANUALS) else REMOVED_NOTES[idx - len(MANUALS)]["content"]
+                text.configure(state="normal")
+                text.delete(1.0, tk.END)
+                text.insert(1.0, content)
+                text.configure(state="disabled")
+            except Exception:
+                pass
+
+        for i, m in enumerate(MANUALS):
+            list_tree.insert("", "end", iid=str(i), values=(m["name"],))
+        for j, r in enumerate(REMOVED_NOTES):
+            iid = str(len(MANUALS) + j)
+            list_tree.insert("", "end", iid=iid, values=(r["name"],), tags=("removed",))
+        list_tree.bind("<<TreeviewSelect>>", lambda e: show_manual(list_tree.selection()[0] if list_tree.selection() else None))
+        if list_tree.get_children():
+            list_tree.selection_set(list_tree.get_children()[0])
+            show_manual(list_tree.get_children()[0])
+
+    # ========== 马尔可夫状态转移分析 ==========
+
+    def open_regime_analysis(self):
+        """状态转移分析（马尔可夫情景分析辅助层）"""
+        if self.data is None or len(self.data) < 12:
+            messagebox.showwarning("警告", "请先加载数据")
+            return
+        try:
+            ts = self.prepare_time_series()
+            result = analyze_regimes(ts)
+            if "error" in result:
+                messagebox.showerror("错误", str(result["error"]))
+                return
+
+            win = tk.Toplevel(self.root)
+            win.title("状态转移分析（马尔可夫情景分析）")
+            win.geometry("880x600")
+            win.configure(bg=T_COLORS["bg_window"])
+            win.transient(self.root)
+
+            info = card_frame(win, "分析摘要")
+            info.pack(fill=tk.X, padx=12, pady=(12, 6))
+            cur = result["current_state"]
+            ss = result["steady_state"]
+            tk.Label(info, text=f"当前状态：{cur} ｜ 状态频率：回落 {result['state_freq']['回落']:.1%} / "
+                                f"平稳 {result['state_freq']['平稳']:.1%} / 增长 {result['state_freq']['增长']:.1%}",
+                     bg=T_COLORS["bg_card"], fg=T_COLORS["text_main"]).pack(anchor="w", padx=8, pady=2)
+            tk.Label(info, text=f"稳态分布：回落 {ss['回落']:.1%} / 平稳 {ss['平稳']:.1%} / 增长 {ss['增长']:.1%}",
+                     bg=T_COLORS["bg_card"], fg=T_COLORS["text_sub"]).pack(anchor="w", padx=8, pady=(0, 4))
+            tk.Label(info, text="说明：按月度环比增速划分状态（>+1% 增长，<-1% 回落）。本分析作为生产保障情景判断的辅助参考，"
+                                "不直接改变预测主路径（客观评估结论，详见评估报告）。",
+                     bg=T_COLORS["bg_card"], fg=T_COLORS["text_sub"]).pack(anchor="w", padx=8, pady=(0, 6))
+
+            mid = tk.Frame(win, bg=T_COLORS["bg_window"])
+            mid.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+
+            # 左：转移矩阵
+            mat_card = card_frame(mid, "状态转移概率矩阵")
+            mat_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            mat_tree = ttk.Treeview(mat_card, columns=("to", "p0", "p1", "p2"), show="headings", height=4, style="Modern.Treeview")
+            for c, label in (("to", "当前\\下一"), ("p0", "回落"), ("p1", "平稳"), ("p2", "增长")):
+                mat_tree.heading(c, text=label)
+                mat_tree.column(c, width=90, anchor=tk.CENTER)
+            mat_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+            P = result["transition_matrix"]
+            names = ["回落", "平稳", "增长"]
+            for i in range(3):
+                mat_tree.insert("", "end", values=(names[i], f"{P[i][0]:.2f}", f"{P[i][1]:.2f}", f"{P[i][2]:.2f}"))
+
+            # 右：未来状态概率图
+            fig_card = card_frame(mid, "未来 12 个月状态概率")
+            fig_card.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(8, 0))
+            fig, ax = plt.subplots(figsize=(5.2, 3.2))
+            canvas = FigureCanvasTkAgg(fig, master=fig_card)
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+            dist = result["forecast_distribution"]
+            months = result["month_labels"]
+            x = list(range(len(months)))
+            ax.stackplot(x, [d[0] for d in dist], [d[1] for d in dist], [d[2] for d in dist],
+                         labels=names, colors=[T_COLORS["danger"], T_COLORS["accent"], T_COLORS["primary_light"]], alpha=0.85)
+            ax.set_xlabel("未来月份", fontsize=9)
+            ax.set_ylabel("概率", fontsize=9)
+            ax.legend(loc="upper right", fontsize=8)
+            ax.grid(alpha=0.25)
+            fig.tight_layout()
+            canvas.draw()
+        except Exception as e:
+            messagebox.showerror("错误", f"状态转移分析失败: {str(e)}")
 
     def update_status(self, message):
         """更新状态栏"""

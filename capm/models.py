@@ -46,24 +46,6 @@ def simple_seasonal_forecast(ts, periods: int = 12):
     return pd.Series(values, index=idx)
 
 
-def linear_forecast(ts, periods: int = 12) -> ForecastOutput:
-    import numpy as np
-    import pandas as pd
-
-    ts = ts.dropna()
-    if len(ts) < 2:
-        return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "too_few_points"})
-
-    x = np.arange(len(ts), dtype=float)
-    y = ts.values.astype(float)
-    slope, intercept = np.polyfit(x, y, deg=1)
-    x_future = np.arange(len(ts), len(ts) + int(periods), dtype=float)
-    y_future = intercept + slope * x_future
-    y_future = np.maximum(y_future, 0.0)
-    fc = pd.Series(y_future, index=_future_month_index(ts, periods))
-    return ForecastOutput(fc, {"method": "linear", "slope": float(slope), "intercept": float(intercept)})
-
-
 def holt_winters_forecast(
     ts,
     periods: int = 12,
@@ -129,6 +111,8 @@ def sarima_forecast(
     order: Tuple[int, int, int] = (1, 1, 1),
     seasonal_order: Tuple[int, int, int, int] = (1, 1, 1, 12),
     auto_tune: bool = False,
+    exog: Any = None,
+    exog_future: Any = None,
 ) -> ForecastOutput:
     import warnings
 
@@ -166,6 +150,7 @@ def sarima_forecast(
             try:
                 model = SARIMAX(
                     ts.astype(float),
+                    exog=exog,
                     order=o,
                     seasonal_order=so,
                     enforce_stationarity=False,
@@ -176,7 +161,7 @@ def sarima_forecast(
                 if aic < best_aic:
                     best_aic = aic
                     best_res = res
-                    best_meta = {"method": "sarima", "order": o, "seasonal_order": so, "aic": aic}
+                    best_meta = {"method": "sarima", "order": o, "seasonal_order": so, "aic": aic, "with_exog": exog is not None}
             except Exception:
                 continue
 
@@ -184,7 +169,7 @@ def sarima_forecast(
         return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "fit_failed"})
 
     idx = _future_month_index(ts, periods)
-    pred = best_res.forecast(steps=int(periods))
+    pred = best_res.forecast(steps=int(periods), exog=exog_future)
     pred = pd.Series(pred.values, index=idx).clip(lower=0.0)
     return ForecastOutput(pred, best_meta)
 
@@ -197,7 +182,13 @@ def ensemble_forecast(
     auto_tune_hw: bool = False,
     sarima_params: Optional[Dict[str, Any]] = None,
     hw_params: Optional[Dict[str, Any]] = None,
+    exog: Any = None,
+    exog_future: Any = None,
 ) -> Tuple[EnsembleOutput, Dict[str, ForecastOutput]]:
+    """精选算法集成融合：Holt-Winters + SARIMA（可选外生变量）。
+
+    权重字典兼容旧配置（linear 键被忽略并重新归一化）。
+    """
     sarima_params = sarima_params or {}
     hw_params = hw_params or {}
 
@@ -215,25 +206,24 @@ def ensemble_forecast(
         order=tuple(sarima_params.get("order", (1, 1, 1))),
         seasonal_order=tuple(sarima_params.get("seasonal_order", (1, 1, 1, 12))),
         auto_tune=bool(auto_tune_sarima),
+        exog=exog,
+        exog_future=exog_future,
     )
-    linear = linear_forecast(ts, periods=periods)
 
     w_hw = float(weights.get("hw", 0.0))
     w_s = float(weights.get("sarima", 0.0))
-    w_l = float(weights.get("linear", 0.0))
-    total = w_hw + w_s + w_l
+    total = w_hw + w_s
     if total <= 0:
-        w_hw = w_s = w_l = 1.0 / 3.0
+        w_hw = w_s = 0.5
         total = 1.0
     w_hw /= total
     w_s /= total
-    w_l /= total
 
     idx = hw.forecast.index
-    ens = (hw.forecast.reindex(idx).astype(float) * w_hw) + (sarima.forecast.reindex(idx).astype(float) * w_s) + (linear.forecast.reindex(idx).astype(float) * w_l)
+    ens = (hw.forecast.reindex(idx).astype(float) * w_hw) + (sarima.forecast.reindex(idx).astype(float) * w_s)
     ens = ens.clip(lower=0.0)
 
-    out = EnsembleOutput(ens, {"hw": w_hw, "sarima": w_s, "linear": w_l}, {"method": "ensemble"})
-    components = {"Holt-Winters": hw, "SARIMA": sarima, "Linear": linear}
+    out = EnsembleOutput(ens, {"hw": w_hw, "sarima": w_s}, {"method": "ensemble", "with_exog": exog is not None})
+    components = {"Holt-Winters": hw, "SARIMA": sarima}
     return out, components
 

@@ -62,8 +62,8 @@ def default_config() -> Dict[str, Any]:
                 },
                 "growth": {"annual_growth_rate": 0.027},
                 "model": {
-                    "weight_mode": "manual",
-                    "weights": {"hw": 0.4, "sarima": 0.3, "linear": 0.3},
+                    "weight_mode": "auto",
+                    "weights": {"hw": 0.5, "sarima": 0.5},
                     "sarima": {
                         "auto_tune": False,
                         "order": [1, 1, 1],
