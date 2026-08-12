@@ -253,6 +253,50 @@ def main():
         verdict = "通过(无自相关)" if (p == p and p > 0.05) else ("未通过(存在自相关)" if p == p else "样本不足")
         print(f"  {name}: stat={r.get('lb_stat', float('nan')):.2f} p={p:.4f} -> {verdict}")
 
+    # ---------- 6) 引擎对比（V1.1.1 干预引擎融入前后）----------
+    print("\n" + "-" * 78)
+    print("6) 引擎对比: 传统管线(legacy) vs 干预集成(intervention, V1.1.1融入)")
+    print("-" * 78)
+    bt_legacy = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors, engine="legacy")
+    bt_int = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors, engine="intervention")
+
+    print("6.1 滚动回测 MAPE%（统一数据 2015-2025，含疫情冲击）:")
+    print(f"  {'模型':<12}{'Legacy(旧管线)':>16}{'Intervention(干预)':>18}")
+    for key, name in (("hw", "HW"), ("sarima", "SARIMA"), ("ensemble", "融合")):
+        l = bt_legacy.get("summary", {}).get(key, {}).get("mape", float("nan"))
+        i = bt_int.get("summary", {}).get(key, {}).get("mape", float("nan"))
+        print(f"  {name:<12}{l:>16.2f}{i:>18.2f}")
+    rec_l = bt_legacy.get("recommendation", {})
+    rec_i = bt_int.get("recommendation", {})
+    print(f"  Legacy 推荐: {rec_l.get('model')} 权重 {rec_l.get('weights')} ({rec_l.get('weight_method')})")
+    print(f"  Interv. 推荐: {rec_i.get('model')} 权重 {rec_i.get('weights')} ({rec_i.get('weight_method')})")
+
+    print("6.2 分阶段对比（融合模型 MAPE%）:")
+    def bucket(part_ts, engine):
+        if len(part_ts) < 36:
+            return float("nan")
+        bt = rolling_backtest(part_ts, profile, horizon=12, step=12, min_train=24, factors=None, engine=engine)
+        return bt.get("summary", {}).get("ensemble", {}).get("mape", float("nan"))
+
+    stages = {
+        "平稳期(2015-2019)": ts[(ts.index >= "2015-01-01") & (ts.index < "2020-01-01")],
+        "冲击期(2020-2022)": ts[(ts.index >= "2020-01-01") & (ts.index < "2023-01-01")],
+        "恢复期(2023-2025)": ts[(ts.index >= "2023-01-01")],
+    }
+    print(f"  {'阶段':<22}{'Legacy':>12}{'Intervention':>16}")
+    for label, part in stages.items():
+        print(f"  {label:<22}{bucket(part, 'legacy'):>12.2f}{bucket(part, 'intervention'):>16.2f}")
+
+    print("6.3 样本外 holdout 对比（前80%训练 → 后20%）:")
+    ho_l = holdout_backtest(ts, profile, train_ratio=0.8, factors=factors, engine="legacy")
+    ho_i = holdout_backtest(ts, profile, train_ratio=0.8, factors=factors, engine="intervention")
+    print(f"  {'模型':<12}{'Legacy MAPE%':>14}{'Interv MAPE%':>16}{'Legacy TheilU':>16}{'Interv TheilU':>16}")
+    for key, name in (("hw", "HW"), ("sarima", "SARIMA"), ("ensemble", "融合")):
+        l = ho_l.get("summary", {}).get(key, {})
+        i = ho_i.get("summary", {}).get(key, {})
+        print(f"  {name:<12}{l.get('mape', float('nan')):>14.2f}{i.get('mape', float('nan')):>16.2f}"
+              f"{l.get('theil_u', float('nan')):>16.2f}{i.get('theil_u', float('nan')):>16.2f}")
+
     print("\n" + "=" * 78)
     print("对比结论：MAPE 越低越好；MDA 为方向命中率；Theil U<1 表示优于朴素基准。")
     print("=" * 78)

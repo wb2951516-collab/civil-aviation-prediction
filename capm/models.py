@@ -193,6 +193,88 @@ def sarima_forecast(
     return ForecastOutput(pred, best_meta)
 
 
+def sarimax_intervention_forecast(
+    ts,
+    periods: int = 12,
+    spring_festival_dates: Optional[Dict[str, Any]] = None,
+    holiday_cfg: Optional[Dict[str, Any]] = None,
+    include_covid: bool = True,
+    order: Tuple[int, int, int] = (1, 1, 1),
+    seasonal_order: Tuple[int, int, int, int] = (1, 1, 1, 12),
+    exog_data: Any = None,
+) -> ForecastOutput:
+    """SARIMAX + 干预变量(节假日+COVID) exog, 无后处理。
+
+    解决两大失真源 (融入来源: V1.1.1 分支):
+      ① 季节性双重叠加: 节假日作为 exog 独立建模, 不再后处理乘法
+      ② COVID 结构断点: covid_step + covid_recovery 干预变量显式建模
+
+    exog_data: 可选, DataFrame 含 'ask'/'gdp' 列 (覆盖历史+未来), 追加为外生变量。
+    """
+    import warnings
+
+    import numpy as np
+    import pandas as pd
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+    from capm.holiday import build_intervention_exog
+
+    ts = ts.dropna()
+    if len(ts) < 8:
+        return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "too_short"})
+
+    spring_festival_dates = spring_festival_dates or {}
+    future_idx = _future_month_index(ts, periods)
+    full_index = ts.index.append(future_idx)
+    exog_all = build_intervention_exog(full_index, spring_festival_dates, holiday_cfg, include_covid, exog_data=exog_data)
+    train_exog = exog_all.iloc[: len(ts)]
+    future_exog = exog_all.iloc[len(ts): len(ts) + periods]
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = SARIMAX(
+                ts.astype(float),
+                exog=train_exog,
+                order=order,
+                seasonal_order=seasonal_order,
+                enforce_stationarity=False,
+                enforce_invertibility=False,
+            )
+            res = model.fit(disp=False)
+            pred = res.forecast(steps=int(periods), exog=future_exog)
+            pred = pd.Series(pred.values, index=future_idx).clip(lower=0.0)
+
+            # 95% 置信区间
+            try:
+                pred_res = res.get_prediction(
+                    start=len(ts),
+                    end=len(ts) + int(periods) - 1,
+                    exog=future_exog,
+                    dynamic=False,
+                )
+                ci = pred_res.conf_int(alpha=0.05)
+                ci_values = np.asarray(ci, dtype=float)
+                conf = pd.DataFrame(ci_values, index=future_idx, columns=["lower", "upper"]).clip(lower=0.0)
+                conf = conf[conf["lower"].notna() & conf["upper"].notna()]
+            except Exception:
+                conf = None
+
+            meta = {
+                "method": "sarimax_intervention",
+                "order": order,
+                "seasonal_order": seasonal_order,
+                "include_covid": include_covid,
+                "exog_cols": list(exog_all.columns),
+                "aic": float(getattr(res, "aic", float("inf"))),
+            }
+            if conf is not None and len(conf):
+                meta["conf_int"] = conf
+            return ForecastOutput(pred, meta)
+    except Exception:
+        return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "fit_failed"})
+
+
 def ensemble_forecast(
     ts,
     weights: Dict[str, float],

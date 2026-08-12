@@ -30,9 +30,10 @@ warnings.filterwarnings('ignore')
 from capm.backtest import recommend_weights_from_backtest, rolling_backtest
 from capm.config_store import ConfigStore
 from capm.datasource import ExternalDataManager
-from capm.growth import apply_annual_growth_adjustment
+from capm.growth import apply_annual_growth_adjustment, growth_sanity_check
 from capm.holiday import (
     apply_holiday_effects,
+    build_intervention_exog,
     compute_holiday_effect,
     compute_month_spring_travel_days,
     compute_spring_travel_span,
@@ -41,7 +42,7 @@ from capm.holiday import (
 from capm.logging_setup import configure_logging
 from capm.manuals import MANUALS, REMOVED_NOTES
 from capm.markov import analyze_regimes
-from capm.models import ensemble_forecast, holt_winters_forecast, sarima_forecast, simple_seasonal_forecast
+from capm.models import ensemble_forecast, holt_winters_forecast, sarima_forecast, sarimax_intervention_forecast, simple_seasonal_forecast
 from capm.theme import COLORS as T_COLORS
 from capm.theme import apply_theme, card_frame
 
@@ -727,6 +728,13 @@ class FinalForecastApp:
         ttk.Radiobutton(advanced_frame, text="手动权重", variable=self.weight_mode_var, value="manual").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(advanced_frame, text="自动权重(回测)", variable=self.weight_mode_var, value="auto").pack(side=tk.LEFT, padx=5)
 
+        # 预测引擎：干预集成(默认, 节假日/COVID 入 exog, 无后处理) / 传统管线
+        engine = self.model_cfg.get("engine", "intervention")
+        self.engine_var = tk.StringVar(value=engine if engine in ["intervention", "legacy"] else "intervention")
+        ttk.Label(advanced_frame, text="引擎:", background=T_COLORS["bg_card"]).pack(side=tk.LEFT, padx=(12, 2))
+        ttk.Radiobutton(advanced_frame, text="干预集成", variable=self.engine_var, value="intervention").pack(side=tk.LEFT, padx=2)
+        ttk.Radiobutton(advanced_frame, text="传统管线", variable=self.engine_var, value="legacy").pack(side=tk.LEFT, padx=2)
+
         sarima_cfg = self.model_cfg.get("sarima", {}) if isinstance(self.model_cfg.get("sarima", {}), dict) else {}
         self.sarima_auto_var = tk.BooleanVar(value=bool(sarima_cfg.get("auto_tune", False)))
         ttk.Checkbutton(advanced_frame, text="SARIMA自动调参", variable=self.sarima_auto_var).pack(side=tk.LEFT, padx=10)
@@ -1223,6 +1231,8 @@ class FinalForecastApp:
 
             if hasattr(self, "weight_mode_var"):
                 self.model_cfg["weight_mode"] = str(self.weight_mode_var.get())
+            if hasattr(self, "engine_var"):
+                self.model_cfg["engine"] = str(self.engine_var.get())
             if hasattr(self, "sarima_auto_var"):
                 self.model_cfg.setdefault("sarima", {})
                 self.model_cfg["sarima"]["auto_tune"] = bool(self.sarima_auto_var.get())
@@ -1371,6 +1381,8 @@ class FinalForecastApp:
 
         if hasattr(self, "weight_mode_var"):
             model_cfg["weight_mode"] = str(self.weight_mode_var.get())
+        if hasattr(self, "engine_var"):
+            model_cfg["engine"] = str(self.engine_var.get())
         model_cfg.setdefault("weights", {})
         if hasattr(self, "hw_weight_var"):
             model_cfg["weights"]["hw"] = float(self.hw_weight_var.get())
@@ -1435,6 +1447,10 @@ class FinalForecastApp:
         if hasattr(self, "weight_mode_var"):
             wm = self.model_cfg.get("weight_mode", "auto")
             self.weight_mode_var.set(wm if wm in ["manual", "auto"] else "auto")
+
+        if hasattr(self, "engine_var"):
+            eng = self.model_cfg.get("engine", "intervention")
+            self.engine_var.set(eng if eng in ["intervention", "legacy"] else "intervention")
 
         if hasattr(self, "sarima_auto_var"):
             sarima_cfg = self.model_cfg.get("sarima", {}) if isinstance(self.model_cfg.get("sarima", {}), dict) else {}
@@ -1646,25 +1662,35 @@ class FinalForecastApp:
 
             # 每次预测前清空置信带（由 SARIMA 路径填充）
             self.model_conf_int = None
+            self.growth_warnings = {}
+
+            # 预测引擎：intervention(默认, 节假日/COVID 入 SARIMAX exog, 无后处理) / legacy(传统后处理管线)
+            engine = str(getattr(self, "engine_var", tk.StringVar(value="intervention")).get() or "intervention")
+            use_intervention = engine == "intervention"
 
             # 根据选择的模型进行预测
             if model_type == "ensemble":
-                forecast = self.ensemble_forecast(ts, factors)
+                forecast = self.intervention_forecast(ts, factors) if use_intervention else self.ensemble_forecast(ts, factors)
             elif model_type == "hw":
                 forecast = self.holt_winters_forecast(ts)
             elif model_type == "sarima":
-                forecast = self.sarima_forecast(ts, factors)
+                forecast = self.sarimax_intervention_forecast(ts, factors) if use_intervention else self.sarima_forecast(ts, factors)
             else:
-                forecast = self.ensemble_forecast(ts, factors)
+                forecast = self.intervention_forecast(ts, factors) if use_intervention else self.ensemble_forecast(ts, factors)
 
             # 记录预测决策信息（供报告/展示）
             self.last_rec_info = rec_info
 
-            # 应用农历假日效应
-            forecast = self.apply_lunar_holiday_effects(forecast)
+            if use_intervention:
+                # 干预引擎: 节假日/COVID 已在 exog 建模, 无乘法后处理;
+                # 增长率改为合理性告警不强制覆盖 (回测实证: 强制覆盖为最大失真源)
+                self.apply_growth_sanity_check(forecast)
+            else:
+                # 应用农历假日效应
+                forecast = self.apply_lunar_holiday_effects(forecast)
 
-            # 应用年度增长率调整
-            forecast = self.apply_annual_growth_adjustment(forecast)
+                # 应用年度增长率调整
+                forecast = self.apply_annual_growth_adjustment(forecast)
 
             # 生成预测结果表格
             self.generate_forecast_table(forecast)
@@ -1710,11 +1736,14 @@ class FinalForecastApp:
             model_cfg.setdefault("sarima", {})
             model_cfg["sarima"]["auto_tune"] = bool(self.sarima_auto_var.get()) if hasattr(self, "sarima_auto_var") else bool(model_cfg.get("sarima", {}).get("auto_tune", False))
 
+            engine = str(getattr(self, "engine_var", tk.StringVar(value="intervention")).get() or "intervention")
+            model_cfg["engine"] = engine
+
             profile["holiday"] = holiday_cfg
             profile["growth"] = growth_cfg
             profile["model"] = model_cfg
 
-            result = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors)
+            result = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors, engine=engine)
             if "error" in result:
                 messagebox.showerror("回测失败", str(result["error"]))
                 return
@@ -1728,8 +1757,9 @@ class FinalForecastApp:
 
             summary = result.get("summary", {})
             rec = result.get("recommendation") or {}
-            text = "回测评估(滚动12个月)：\n\n"
-            for k, name in [("hw", "Holt-Winters"), ("sarima", "SARIMA"), ("ensemble", "融合模型")]:
+            engine_label = "干预集成" if engine == "intervention" else "传统管线"
+            text = f"回测评估(滚动12个月 · 引擎: {engine_label})：\n\n"
+            for k, name in [("hw", "Holt-Winters"), ("sarima", "SARIMA" + ("(干预)" if engine == "intervention" else "")), ("ensemble", "融合模型")]:
                 s = summary.get(k, {})
                 text += f"{name} - MAPE: {s.get('mape', float('nan')):.2f}%, RMSE: {s.get('rmse', float('nan')):.2f}, "
                 text += f"MDA: {s.get('mda', float('nan')):.2f}, TheilU: {s.get('theil_u', float('nan')):.2f}\n"
@@ -1762,6 +1792,110 @@ class FinalForecastApp:
             return train, fut_f
         except Exception:
             return None, None
+
+    def _prepare_exog_full(self, ts, factors, periods: int = 12):
+        """构造覆盖 (历史+未来) 的 ask/gdp 外生变量 DataFrame（供干预引擎）"""
+        if factors is None or len(ts) == 0:
+            return None
+        try:
+            train, fut_f = self._prepare_exog(ts, factors, periods)
+            if train is None or fut_f is None:
+                return None
+            return pd.concat([train, fut_f])
+        except Exception:
+            return None
+
+    def intervention_forecast(self, ts, factors=None):
+        """V2 干预集成引擎: HW + SARIMAX(节假日/COVID exog), 无后处理。
+
+        解决两大失真源 (融入来源: V1.1.1 分支):
+          ① 季节性双重叠加 → 节假日入 SARIMAX exog, 不再后处理乘法
+          ② COVID 结构断点 → covid_step + covid_recovery 干预变量显式建模
+        增长率仅告警不强制覆盖 (apply_growth_sanity_check)。
+        """
+        weights = {"hw": float(self.hw_weight_var.get()), "sarima": float(self.sarima_weight_var.get())}
+        sarima_cfg = self.model_cfg.get("sarima", {}) if isinstance(self.model_cfg.get("sarima", {}), dict) else {}
+        hw_cfg = self.model_cfg.get("holt_winters", {}) if isinstance(self.model_cfg.get("holt_winters", {}), dict) else {}
+        exog_full = self._prepare_exog_full(ts, factors)
+
+        hw = holt_winters_forecast(
+            ts,
+            periods=12,
+            trend=hw_cfg.get("trend", "add"),
+            seasonal=hw_cfg.get("seasonal", "add"),
+            seasonal_periods=int(hw_cfg.get("seasonal_periods", 12)),
+            auto_tune=bool(self.hw_auto_var.get()) if hasattr(self, "hw_auto_var") else bool(hw_cfg.get("auto_tune", False)),
+        )
+        sar = sarimax_intervention_forecast(
+            ts,
+            periods=12,
+            spring_festival_dates=dict(self.spring_festival_dates),
+            holiday_cfg=dict(self.holiday_cfg),
+            include_covid=True,
+            order=tuple(sarima_cfg.get("order", (1, 1, 1))),
+            seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
+            exog_data=exog_full,
+        )
+        w_hw = float(weights.get("hw", 0.5))
+        w_s = float(weights.get("sarima", 0.5))
+        total = w_hw + w_s
+        if total <= 0:
+            w_hw = w_s = 0.5
+            total = 1.0
+        w_hw, w_s = w_hw / total, w_s / total
+        idx = hw.forecast.index
+        ens = (hw.forecast.reindex(idx).astype(float) * w_hw) + (sar.forecast.reindex(idx).astype(float) * w_s)
+        ens = ens.clip(lower=0.0)
+        self.model_results = {
+            "Holt-Winters": hw.forecast,
+            "SARIMAX-干预": sar.forecast,
+            "Ensemble": ens,
+        }
+        self.model_conf_int = sar.meta.get("conf_int")
+        return ens
+
+    def sarimax_intervention_forecast(self, ts, factors=None):
+        """单模型干预引擎: SARIMAX(节假日/COVID exog), 无后处理"""
+        sarima_cfg = self.model_cfg.get("sarima", {}) if isinstance(self.model_cfg.get("sarima", {}), dict) else {}
+        exog_full = self._prepare_exog_full(ts, factors)
+        out = sarimax_intervention_forecast(
+            ts,
+            periods=12,
+            spring_festival_dates=dict(self.spring_festival_dates),
+            holiday_cfg=dict(self.holiday_cfg),
+            include_covid=True,
+            order=tuple(sarima_cfg.get("order", (1, 1, 1))),
+            seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
+            exog_data=exog_full,
+        )
+        self.model_conf_int = out.meta.get("conf_int")
+        return out.forecast
+
+    def apply_growth_sanity_check(self, forecast):
+        """增长率合理性告警: 不修改预测值, 偏离设定增长率时提示业务判断"""
+        annual_growth_rate = float(self.growth_cfg.get("annual_growth_rate", self.lunar_config.get("annual_growth_rate", 0.027)))
+        historical_yearly_total = None
+        if self.data is not None and len(self.data) > 0:
+            last_year = int(self.data["年份"].max())
+            last_year_data = self.data[self.data["年份"] == last_year]
+            if len(last_year_data) == 12:
+                historical_yearly_total = float(last_year_data["旅客运输量"].sum())
+            elif len(last_year_data) > 0:
+                historical_yearly_total = float(last_year_data["旅客运输量"].mean() * 12)
+        unchanged, warnings_info = growth_sanity_check(forecast, annual_growth_rate, historical_yearly_total)
+        self.growth_warnings = warnings_info
+        alerts = {y: info for y, info in warnings_info.items() if info.get("level") != "ok"}
+        if alerts:
+            msg = "增长率合理性告警（模型趋势项与设定增长率的偏离）：\n"
+            for y, info in alerts.items():
+                msg += f"  {y}年: 偏离 {info.get('deviation_pct', 0):+.1f}% (级别: {info.get('level')})\n"
+            msg += "\n干预引擎不强制修改预测值，请结合业务判断。"
+            self.update_status("预测完成（含增长率告警）")
+            try:
+                messagebox.showwarning("增长率告警", msg)
+            except Exception:
+                pass
+        return unchanged
 
     def ensemble_forecast(self, ts, factors=None):
         weights = {"hw": float(self.hw_weight_var.get()), "sarima": float(self.sarima_weight_var.get())}

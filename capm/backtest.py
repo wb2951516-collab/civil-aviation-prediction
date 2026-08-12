@@ -126,20 +126,26 @@ def rolling_backtest(
     step: int = 12,
     min_train: int = 24,
     factors: Any = None,
+    engine: str = "intervention",
 ) -> Dict[str, Any]:
     """滚动窗口回测（walk-forward）。
 
     对精选模型集合（Holt-Winters / SARIMA / 融合）逐窗口评估，
     返回汇总指标、逐窗口误差（供 BMA 使用）与推荐结论。
+
+    engine: "intervention"(默认, 节假日/COVID 入 SARIMAX exog, 无后处理)
+            | "legacy"(后处理乘法效应 + 年度增长强制覆盖, 供对比)
     """
     import pandas as pd
 
-    from capm.models import ForecastOutput, ensemble_forecast, holt_winters_forecast, sarima_forecast
+    from capm.models import ForecastOutput, ensemble_forecast, holt_winters_forecast, sarima_forecast, sarimax_intervention_forecast
 
     holiday_cfg = profile.get("holiday", {})
     growth_cfg = profile.get("growth", {})
     model_cfg = profile.get("model", {})
     spring_festival_dates = profile.get("spring_festival_dates", {})
+
+    use_intervention = str(engine).lower() != "legacy"
 
     sarima_cfg = model_cfg.get("sarima", {})
     hw_cfg = model_cfg.get("holt_winters", {})
@@ -176,33 +182,71 @@ def rolling_backtest(
             seasonal_periods=int(hw_cfg.get("seasonal_periods", 12)),
             auto_tune=bool(hw_cfg.get("auto_tune", False)),
         )
-        sarima_out = sarima_forecast(
-            train,
-            periods=len(test),
-            order=tuple(sarima_cfg.get("order", (1, 1, 1))),
-            seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
-            auto_tune=bool(sarima_cfg.get("auto_tune", False)),
-            exog=exog_train,
-            exog_future=exog_test,
-        )
+        if use_intervention:
+            # 干预引擎: 节假日/COVID 干预变量 + ask/gdp 外生变量, 无后处理
+            exog_full = None
+            if factors is not None and exog_train is not None and exog_test is not None:
+                try:
+                    exog_full = pd.concat([exog_train, exog_test])
+                except Exception:
+                    exog_full = None
+            sarima_out = sarimax_intervention_forecast(
+                train,
+                periods=len(test),
+                spring_festival_dates=spring_festival_dates,
+                holiday_cfg=holiday_cfg,
+                include_covid=True,
+                order=tuple(sarima_cfg.get("order", (1, 1, 1))),
+                seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
+                exog_data=exog_full,
+            )
+        else:
+            sarima_out = sarima_forecast(
+                train,
+                periods=len(test),
+                order=tuple(sarima_cfg.get("order", (1, 1, 1))),
+                seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
+                auto_tune=bool(sarima_cfg.get("auto_tune", False)),
+                exog=exog_train,
+                exog_future=exog_test,
+            )
 
-        hw_pred = _post_process(hw_out, holiday_cfg, growth_cfg, spring_festival_dates, hist_total).reindex(test_index)
-        sarima_pred = _post_process(sarima_out, holiday_cfg, growth_cfg, spring_festival_dates, hist_total).reindex(test_index)
+        if use_intervention:
+            # 干预引擎: 节假日/COVID 已在 exog 建模, 不做后处理
+            def post_process(out: ForecastOutput):
+                return out.forecast
+        else:
+            # legacy: 保留假日乘法 + 增长率强制覆盖
+            def post_process(out: ForecastOutput):
+                from capm.growth import apply_annual_growth_adjustment
+                from capm.holiday import apply_holiday_effects
+
+                s, spring_info = apply_holiday_effects(out.forecast, holiday_cfg, spring_festival_dates)
+                s2, _ = apply_annual_growth_adjustment(s, float(growth_cfg.get("annual_growth_rate", 0.027)), hist_total)
+                return s2
+
+        hw_pred = post_process(hw_out).reindex(test_index)
+        sarima_pred = post_process(sarima_out).reindex(test_index)
 
         # 融合：以滚动窗口内的 MAPE 倒数中间权重（与历史版本保持可对比性）
         mid = _map_weights({"hw": hw_pred, "sarima": sarima_pred}, test)
-        ens_out, _ = ensemble_forecast(
-            train,
-            weights=mid,
-            periods=len(test),
-            auto_tune_sarima=bool(sarima_cfg.get("auto_tune", False)),
-            auto_tune_hw=bool(hw_cfg.get("auto_tune", False)),
-            sarima_params={"order": sarima_cfg.get("order", [1, 1, 1]), "seasonal_order": sarima_cfg.get("seasonal_order", [1, 1, 1, 12])},
-            hw_params={"trend": hw_cfg.get("trend", "add"), "seasonal": hw_cfg.get("seasonal", "add"), "seasonal_periods": hw_cfg.get("seasonal_periods", 12)},
-            exog=exog_train,
-            exog_future=exog_test,
-        )
-        ens_pred = _post_process(ens_out, holiday_cfg, growth_cfg, spring_festival_dates, hist_total).reindex(test_index)
+        if use_intervention:
+            # 干预引擎: 融合 = HW 与已建模干预的 SARIMA 直接加权（避免重复建模）
+            ens_pred = (hw_pred.astype(float) * mid.get("hw", 0.5)) + (sarima_pred.astype(float) * mid.get("sarima", 0.5))
+            ens_pred = ens_pred.clip(lower=0.0)
+        else:
+            ens_out, _ = ensemble_forecast(
+                train,
+                weights=mid,
+                periods=len(test),
+                auto_tune_sarima=bool(sarima_cfg.get("auto_tune", False)),
+                auto_tune_hw=bool(hw_cfg.get("auto_tune", False)),
+                sarima_params={"order": sarima_cfg.get("order", [1, 1, 1]), "seasonal_order": sarima_cfg.get("seasonal_order", [1, 1, 1, 12])},
+                hw_params={"trend": hw_cfg.get("trend", "add"), "seasonal": hw_cfg.get("seasonal", "add"), "seasonal_periods": hw_cfg.get("seasonal_periods", 12)},
+                exog=exog_train,
+                exog_future=exog_test,
+            )
+            ens_pred = post_process(ens_out).reindex(test_index)
 
         for key, pred in (("hw", hw_pred), ("sarima", sarima_pred), ("ensemble", ens_pred)):
             m = _metrics(test.values, pred.values)
@@ -238,11 +282,12 @@ def holdout_backtest(
     train_ratio: float = 0.8,
     horizon: Optional[int] = None,
     factors: Any = None,
+    engine: str = "intervention",
 ) -> Dict[str, Any]:
     """样本外一次性回测：训练集外推 horizon 个月，与真实值对比。"""
     import pandas as pd
 
-    from capm.models import ensemble_forecast, holt_winters_forecast, sarima_forecast
+    from capm.models import ensemble_forecast, holt_winters_forecast, sarima_forecast, sarimax_intervention_forecast
 
     n = len(ts)
     if n < 24:
@@ -253,6 +298,8 @@ def holdout_backtest(
     train, test = ts.iloc[:cut], ts.iloc[cut : cut + horizon]
     if len(test) == 0:
         return {"error": "样本外区间为空"}
+
+    use_intervention = str(engine).lower() != "legacy"
 
     holiday_cfg = profile.get("holiday", {})
     growth_cfg = profile.get("growth", {})
@@ -275,25 +322,59 @@ def holdout_backtest(
         seasonal_periods=int(hw_cfg.get("seasonal_periods", 12)),
         auto_tune=bool(hw_cfg.get("auto_tune", False)),
     )
-    sarima_out = sarima_forecast(
-        train, periods=len(test),
-        order=tuple(sarima_cfg.get("order", (1, 1, 1))),
-        seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
-        auto_tune=bool(sarima_cfg.get("auto_tune", False)),
-        exog=exog_train, exog_future=exog_test,
-    )
-    hw_pred = _post_process(hw_out, holiday_cfg, growth_cfg, spring_festival_dates, hist_total).reindex(test_index)
-    sarima_pred = _post_process(sarima_out, holiday_cfg, growth_cfg, spring_festival_dates, hist_total).reindex(test_index)
+    if use_intervention:
+        exog_full = None
+        if factors is not None and exog_train is not None and exog_test is not None:
+            try:
+                exog_full = pd.concat([exog_train, exog_test])
+            except Exception:
+                exog_full = None
+        sarima_out = sarimax_intervention_forecast(
+            train, periods=len(test),
+            spring_festival_dates=spring_festival_dates,
+            holiday_cfg=holiday_cfg,
+            include_covid=True,
+            order=tuple(sarima_cfg.get("order", (1, 1, 1))),
+            seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
+            exog_data=exog_full,
+        )
+    else:
+        sarima_out = sarima_forecast(
+            train, periods=len(test),
+            order=tuple(sarima_cfg.get("order", (1, 1, 1))),
+            seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
+            auto_tune=bool(sarima_cfg.get("auto_tune", False)),
+            exog=exog_train, exog_future=exog_test,
+        )
+    if use_intervention:
+        def post_process(out):
+            return out.forecast
+    else:
+        def post_process(out):
+            from capm.growth import apply_annual_growth_adjustment
+            from capm.holiday import apply_holiday_effects
+
+            s, _ = apply_holiday_effects(out.forecast, holiday_cfg, spring_festival_dates)
+            s2, _ = apply_annual_growth_adjustment(s, float(growth_cfg.get("annual_growth_rate", 0.027)), hist_total)
+            return s2
+
+    hw_pred = post_process(hw_out).reindex(test_index)
+    sarima_pred = post_process(sarima_out).reindex(test_index)
     mid = _map_weights({"hw": hw_pred, "sarima": sarima_pred}, test)
-    ens_out, _ = ensemble_forecast(
-        train, weights=mid, periods=len(test),
-        auto_tune_sarima=bool(sarima_cfg.get("auto_tune", False)),
-        auto_tune_hw=bool(hw_cfg.get("auto_tune", False)),
-        sarima_params={"order": sarima_cfg.get("order", [1, 1, 1]), "seasonal_order": sarima_cfg.get("seasonal_order", [1, 1, 1, 12])},
-        hw_params={"trend": hw_cfg.get("trend", "add"), "seasonal": hw_cfg.get("seasonal", "add"), "seasonal_periods": hw_cfg.get("seasonal_periods", 12)},
-        exog=exog_train, exog_future=exog_test,
-    )
-    ens_pred = _post_process(ens_out, holiday_cfg, growth_cfg, spring_festival_dates, hist_total).reindex(test_index)
+    if use_intervention:
+        # 干预引擎: 融合 = HW 与已建模干预的 SARIMA 直接加权（避免重复建模）
+        ens_pred = (hw_pred.astype(float) * mid.get("hw", 0.5)) + (sarima_pred.astype(float) * mid.get("sarima", 0.5))
+        ens_pred = ens_pred.clip(lower=0.0)
+    else:
+        ens_out, _ = ensemble_forecast(
+            train, weights=mid, periods=len(test),
+            auto_tune_sarima=bool(sarima_cfg.get("auto_tune", False)),
+            auto_tune_hw=bool(hw_cfg.get("auto_tune", False)),
+            sarima_params={"order": sarima_cfg.get("order", [1, 1, 1]), "seasonal_order": sarima_cfg.get("seasonal_order", [1, 1, 1, 12])},
+            hw_params={"trend": hw_cfg.get("trend", "add"), "seasonal": hw_cfg.get("seasonal", "add"), "seasonal_periods": hw_cfg.get("seasonal_periods", 12)},
+            exog=exog_train, exog_future=exog_test,
+        )
+        ens_pred = _post_process(ens_out, holiday_cfg, growth_cfg, spring_festival_dates, hist_total).reindex(test_index)
 
     predictions = {"hw": hw_pred, "sarima": sarima_pred, "ensemble": ens_pred}
     summary = {}
