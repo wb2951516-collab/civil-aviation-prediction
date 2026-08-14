@@ -28,6 +28,7 @@ except Exception:
 warnings.filterwarnings('ignore')
 
 from capm.backtest import recommend_weights_from_backtest, rolling_backtest
+from capm.column_resizer import ColumnResizer
 from capm.config_store import ConfigStore
 from capm.datasource import ExternalDataManager
 from capm.growth import apply_annual_growth_adjustment, growth_sanity_check
@@ -229,6 +230,41 @@ def _apply_geometry(win, width: int, height: int, parent=None, margin: int = 48,
         win.minsize(int(min_w), int(min_h))
         screen_w = win.winfo_screenwidth()
         screen_h = win.winfo_screenheight()
+        win.maxsize(max(int(min_w), screen_w - 16), max(int(min_h), screen_h - 16))
+    except Exception:
+        pass
+    return geo
+
+
+def _content_fit_geometry(win, parent, base_w: int, base_h: int, min_w: int = 320, min_h: int = 240, margin: int = 48, max_ratio: float = 0.9):
+    """按窗口实际内容需求自动计算初始尺寸：初始尺寸 = max(基准, 内容需求) 且不超过屏幕可用区域。
+
+    先 update_idletasks 读取 winfo_reqwidth/reqheight（内容控件布局实际所需宽高），
+    再复用 _screen_geometry 做屏幕约束与相对父窗口居中，最后设置 minsize/maxsize。
+    解决"弹窗初始尺寸过小、内容显示不全、需手动拉伸"的问题。
+    """
+    try:
+        win.update_idletasks()
+        req_w = int(win.winfo_reqwidth())
+        req_h = int(win.winfo_reqheight())
+    except Exception:
+        req_w, req_h = 0, 0
+    try:
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+    except Exception:
+        screen_w, screen_h = 1920, 1080
+
+    # 尺寸 = max(基准, 内容需求)，并限制在屏幕可用区域（max_ratio）内
+    w = max(int(min_w), int(base_w), req_w)
+    h = max(int(min_h), int(base_h), req_h)
+    w = min(w, max(int(min_w), int(screen_w * max_ratio) - margin))
+    h = min(h, max(int(min_h), int(screen_h * max_ratio) - margin))
+
+    geo, _, _ = _screen_geometry(win, w, h, parent, margin=0, min_w=int(min_w), min_h=int(min_h))
+    try:
+        win.geometry(geo)
+        win.minsize(int(min_w), int(min_h))
         win.maxsize(max(int(min_w), screen_w - 16), max(int(min_h), screen_h - 16))
     except Exception:
         pass
@@ -489,24 +525,18 @@ class FinalForecastApp:
             # 注意：info_text 可能被 destroy 或未创建，这里检查属性
             pass
 
-        # 比例缩放：调整所有列宽
+        # 比例缩放：按内容自动适配列宽（表头与单元格文本取较长者）
         if hasattr(self, "forecast_tree"):
             try:
                 self.forecast_tree.configure(style="Forecast.Treeview")
-                self.forecast_tree.column("年份", width=int(90 * scale), minwidth=int(70 * scale), anchor=tk.CENTER, stretch=False)
-                self.forecast_tree.column("月份", width=int(80 * scale), minwidth=int(60 * scale), anchor=tk.CENTER, stretch=False)
-                self.forecast_tree.column("旅客运输量", width=int(180 * scale), minwidth=int(130 * scale), anchor=tk.E, stretch=True)
-                self.forecast_tree.column("春运天数", width=int(100 * scale), minwidth=int(80 * scale), anchor=tk.CENTER, stretch=False)
-                self.forecast_tree.column("增长率", width=int(110 * scale), minwidth=int(90 * scale), anchor=tk.E, stretch=False)
+                self._auto_fit_columns(self.forecast_tree, ["年份", "月份", "旅客运输量", "春运天数", "增长率"])
             except Exception:
                 pass
 
         if hasattr(self, "history_tree"):
             try:
                 self.history_tree.configure(style="Forecast.Treeview")
-                self.history_tree.column("年份", width=int(90 * scale), minwidth=int(70 * scale), anchor=tk.CENTER, stretch=False)
-                self.history_tree.column("月份", width=int(80 * scale), minwidth=int(60 * scale), anchor=tk.CENTER, stretch=False)
-                self.history_tree.column("旅客运输量", width=int(180 * scale), minwidth=int(130 * scale), anchor=tk.E, stretch=True)
+                self._auto_fit_columns(self.history_tree, ["年份", "月份", "旅客运输量"])
             except Exception:
                 pass
 
@@ -518,6 +548,44 @@ class FinalForecastApp:
                 self.forecast_zoom_value_label.configure(text=f"{int(round(scale * 100))}%")
             except Exception:
                 pass
+
+    def _auto_fit_columns(self, tree, columns, padding: int = 28):
+        """按'表头文字与单元格内容取较长者'自动计算并设置每列宽度。
+
+        - 对每列测量表头文本与全部单元格文本的像素宽度，取最大值 + padding；
+        - 跳过用户手动拖拽锁定的列（ColumnResizer._locked），保留用户设置；
+        - 仅扫描前 200 行，避免超长数据拖慢。
+        """
+        try:
+            resizer = None
+            for attr in ("forecast_resizer", "history_resizer"):
+                r = getattr(self, attr, None)
+                if r is not None and getattr(r, "tree", None) is tree:
+                    resizer = r
+                    break
+            locked = set(getattr(resizer, "_locked", set())) if resizer is not None else set()
+
+            font = self._fonts.get("tree") if getattr(self, "_fonts", None) else None
+            if font is None:
+                font = tkfont.Font(self.root, family="微软雅黑", size=10)
+            scale = float(self.ui_scale_var.get() or 1.0) if hasattr(self, "ui_scale_var") else 1.0
+
+            for col in columns:
+                if col in locked:
+                    continue
+                header_text = str(tree.heading(col, "text") or col)
+                max_w = font.measure(header_text)
+                for iid in tree.get_children()[:200]:
+                    try:
+                        val = str(tree.set(iid, col) or "")
+                    except Exception:
+                        val = ""
+                    if val:
+                        max_w = max(max_w, font.measure(val))
+                width = max(40, int(max_w) + int(padding * scale))
+                tree.column(col, width=width, minwidth=40)
+        except Exception:
+            pass
 
     def _refresh_all_charts(self):
         """刷新所有图表以适应新的缩放比例"""
@@ -587,7 +655,7 @@ class FinalForecastApp:
         tk.Label(title_frame, text="民航旅客运输量预测系统",
                  font=('微软雅黑', 20, 'bold'), bg='#f0f0f0').pack()
 
-        tk.Label(title_frame, text="春运比例拆分 + 年度增长率校准 + 精选算法集成 (V1.2)",
+        tk.Label(title_frame, text="春运比例拆分 + 年度增长率校准 + 精选算法集成 (V1.3)",
                  font=('微软雅黑', 11), bg='#f0f0f0', fg='#666').pack()
 
         # 控制面板（卡片化分组）
@@ -702,6 +770,13 @@ class FinalForecastApp:
         self._bind_drag_scroll(self.history_tree)
         self.history_tree.tag_configure("odd", background=T_COLORS["row_alt"])
         self.history_tree.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel_zoom, add="+")
+
+        # 列宽拖动自适应（用户拖拽后锁定该列，不再自动分配）
+        self.history_resizer = ColumnResizer(
+            self.history_tree,
+            weights={"年份": 0.9, "月份": 0.8, "旅客运输量": 1.8},
+            min_width=60, max_width=400,
+        )
 
         # 右侧：数据统计和导出
         right_frame = tk.Frame(self.data_paned, bg='#f9f9f9')
@@ -885,6 +960,13 @@ class FinalForecastApp:
         self.forecast_tree.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel_zoom, add="+")
         self._bind_drag_scroll(self.forecast_tree)
 
+        # 列宽拖动自适应（用户拖拽后锁定该列，不再自动分配）
+        self.forecast_resizer = ColumnResizer(
+            self.forecast_tree,
+            weights={"年份": 0.9, "月份": 0.8, "旅客运输量": 1.8, "春运天数": 1.0, "增长率": 1.1},
+            min_width=60, max_width=420,
+        )
+
         right_frame = tk.Frame(self.forecast_paned)
         self.forecast_paned.add(right_frame, weight=1)
 
@@ -921,6 +1003,8 @@ class FinalForecastApp:
         self.analysis_fig, self.analysis_axs = plt.subplots(2, 2, figsize=(10, 8))
         self.analysis_canvas = FigureCanvasTkAgg(self.analysis_fig, self.analysis_container)
         self.analysis_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        # 窗口尺寸变化时自动重绘（防抖）
+        self.analysis_canvas.get_tk_widget().bind("<Configure>", lambda e: self._schedule_chart_redraw("analysis"), add="+")
         if getattr(self, "analysis_placeholder", None) is not None:
             self.analysis_placeholder.destroy()
             self.analysis_placeholder = None
@@ -931,9 +1015,37 @@ class FinalForecastApp:
         self.forecast_fig, self.forecast_ax = plt.subplots(figsize=(8, 5))
         self.forecast_canvas = FigureCanvasTkAgg(self.forecast_fig, self.forecast_container)
         self.forecast_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # 窗口尺寸变化时自动重绘（防抖）
+        self.forecast_canvas.get_tk_widget().bind("<Configure>", lambda e: self._schedule_chart_redraw("forecast"), add="+")
         if getattr(self, "forecast_placeholder", None) is not None:
             self.forecast_placeholder.destroy()
             self.forecast_placeholder = None
+
+    def _schedule_chart_redraw(self, kind: str):
+        """图表区尺寸变化后防抖重绘（150ms 合并多次 Configure 事件）"""
+        attr = f"_{kind}_redraw_after"
+        current = getattr(self, attr, None)
+        if current is not None:
+            try:
+                self.root.after_cancel(current)
+            except Exception:
+                pass
+        setattr(self, attr, self.root.after(150, lambda: self._do_chart_redraw(kind)))
+
+    def _do_chart_redraw(self, kind: str):
+        """执行图表重绘：tight_layout 防标签/图例裁切"""
+        setattr(self, f"_{kind}_redraw_after", None)
+        try:
+            if kind == "forecast":
+                if getattr(self, "forecast_canvas", None) is not None and getattr(self, "_last_forecast", None) is not None:
+                    self.forecast_fig.tight_layout()
+                    self.forecast_canvas.draw_idle()
+            elif kind == "analysis":
+                if getattr(self, "analysis_canvas", None) is not None and getattr(self, "_last_analysis_ts", None) is not None:
+                    self.analysis_fig.tight_layout()
+                    self.analysis_canvas.draw_idle()
+        except Exception:
+            pass
 
     def create_config_tab(self, notebook):
         """创建配置参数标签页"""
@@ -1108,6 +1220,7 @@ class FinalForecastApp:
 
         # 更新统计信息
         self.update_stats()
+        self._auto_fit_columns(self.history_tree, ["年份", "月份", "旅客运输量"])
 
         self.update_status("示例数据已加载")
 
@@ -1150,15 +1263,47 @@ class FinalForecastApp:
             self.stats_text.insert(1.0, stats_text)
 
     def import_data(self):
-        """导入Excel数据"""
-        file_path = filedialog.askopenfilename(
-            title="选择Excel文件",
-            filetypes=[("Excel文件", "*.xlsx *.xls"), ("所有文件", "*.*")]
-        )
+        """导入 Excel 数据（自定义弹窗：文件选择 + 格式说明 + 加载反馈）"""
+        win = tk.Toplevel(self.root)
+        win.title("导入数据")
+        win.configure(bg=T_COLORS["bg_window"])
+        win.transient(self.root)
 
-        if file_path:
+        # 标题
+        tk.Label(win, text="导入 Excel 数据", font=('微软雅黑', 14, 'bold'),
+                 bg=T_COLORS["bg_window"], fg=T_COLORS["primary"]).pack(anchor="w", padx=16, pady=(14, 6))
+
+        # 文件路径区
+        path_card = card_frame(win, "数据文件")
+        path_card.pack(fill=tk.X, padx=16, pady=4)
+        self._import_path_var = tk.StringVar(value="")
+        path_entry = ttk.Entry(path_card, textvariable=self._import_path_var, state="readonly", width=42)
+        path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 6), pady=8)
+        ttk.Button(path_card, text="浏览...", style="Secondary.TButton",
+                   command=lambda: self._browse_import_file(win)).pack(side=tk.RIGHT, padx=(0, 8), pady=8)
+
+        # 格式说明区
+        note_card = card_frame(win, "格式说明")
+        note_card.pack(fill=tk.X, padx=16, pady=4)
+        tk.Label(note_card, text="· 支持 .xlsx / .xls 文件\n"
+                                   "· 需包含三列：年份、月份、旅客运输量（或按前三列顺序）\n"
+                                   "· 旅客运输量单位为原始数据口径，导入后可在数据管理页查看",
+                 justify=tk.LEFT, bg=T_COLORS["bg_card"], fg=T_COLORS["text_sub"],
+                 anchor="w").pack(anchor="w", padx=8, pady=(4, 8))
+
+        # 状态提示（导入结果）
+        status_lbl = tk.Label(win, text="", bg=T_COLORS["bg_window"], fg=T_COLORS["text_sub"], anchor="w")
+        status_lbl.pack(fill=tk.X, padx=16, pady=(2, 0))
+
+        def _browse():
+            self._browse_import_file(win)
+
+        def _do_import():
+            file_path = str(self._import_path_var.get()).strip()
+            if not file_path:
+                status_lbl.configure(text="请先选择要导入的 Excel 文件", fg=T_COLORS["danger"])
+                return
             try:
-                # 读取Excel文件
                 df = pd.read_excel(file_path)
 
                 # 清空表格
@@ -1188,35 +1333,61 @@ class FinalForecastApp:
                 if len(self.data.columns) == 3:
                     self.data.columns = ['年份', '月份', '旅客运输量']
 
-                # 更新统计信息
+                # 更新统计信息 + 列宽自动适配
                 self.update_stats()
+                self._auto_fit_columns(self.history_tree, ["年份", "月份", "旅客运输量"])
 
                 self.update_status(f"数据导入成功: {os.path.basename(file_path)}")
-                messagebox.showinfo("成功", f"成功导入 {len(df)} 条数据")
+                status_lbl.configure(text=f"成功导入 {len(df)} 条数据", fg=T_COLORS["success"])
+                win.after(600, win.destroy)
 
             except Exception as e:
                 logging.exception("导入失败")
-                messagebox.showerror("错误", f"导入失败: {str(e)}")
+                status_lbl.configure(text=f"导入失败: {e}", fg=T_COLORS["danger"])
+
+        # 底部按钮
+        btn_frame = tk.Frame(win, bg=T_COLORS["bg_window"])
+        btn_frame.pack(fill=tk.X, padx=16, pady=(6, 14))
+        ttk.Button(btn_frame, text="确定导入", style="Modern.TButton", command=_do_import).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="取消", style="Secondary.TButton", command=win.destroy).pack(side=tk.LEFT, padx=8)
+
+        # 内容自适应：先布局再按实际需求计算尺寸并居中
+        win.update_idletasks()
+        _content_fit_geometry(win, self.root, 520, 360, min_w=440, min_h=300)
+        win.grab_set()
+        self.root.wait_window(win)
+
+    def _browse_import_file(self, win):
+        file_path = filedialog.askopenfilename(
+            title="选择Excel文件",
+            filetypes=[("Excel文件", "*.xlsx *.xls"), ("所有文件", "*.*")],
+            parent=win,
+        )
+        if file_path:
+            self._import_path_var.set(file_path)
 
     def manual_input(self):
         """手动录入数据窗口"""
         input_window = tk.Toplevel(self.root)
         input_window.title("手动录入数据")
-        _apply_geometry(input_window, 400, 320, parent=self.root, min_w=360, min_h=280)
+        input_window.configure(bg=T_COLORS["bg_window"])
+        input_window.transient(self.root)
 
-        tk.Label(input_window, text="录入新数据", font=('微软雅黑', 14, 'bold')).pack(pady=10)
+        tk.Label(input_window, text="录入新数据", font=('微软雅黑', 14, 'bold'),
+                 bg=T_COLORS["bg_window"], fg=T_COLORS["primary"]).pack(pady=(14, 8))
 
         # 输入框架
-        input_frame = tk.Frame(input_window)
-        input_frame.pack(pady=10)
+        input_frame = tk.Frame(input_window, bg=T_COLORS["bg_window"])
+        input_frame.pack(pady=8, padx=20)
 
         entries = {}
         labels = ['年份', '月份', '旅客运输量']
 
         for i, label in enumerate(labels):
-            tk.Label(input_frame, text=label + ":").grid(row=i, column=0, padx=5, pady=5, sticky='e')
+            tk.Label(input_frame, text=label + ":", bg=T_COLORS["bg_window"],
+                     fg=T_COLORS["text_main"]).grid(row=i, column=0, padx=5, pady=6, sticky='e')
             entry = tk.Entry(input_frame, width=20)
-            entry.grid(row=i, column=1, padx=5, pady=5)
+            entry.grid(row=i, column=1, padx=5, pady=6)
             entries[label] = entry
 
         def save_data():
@@ -1247,6 +1418,7 @@ class FinalForecastApp:
 
                 # 更新统计信息
                 self.update_stats()
+                self._auto_fit_columns(self.history_tree, ["年份", "月份", "旅客运输量"])
 
                 input_window.destroy()
                 self.update_status("数据录入成功")
@@ -1255,11 +1427,15 @@ class FinalForecastApp:
                 messagebox.showerror("错误", f"输入错误: {str(e)}")
 
         # 按钮
-        button_frame = tk.Frame(input_window)
-        button_frame.pack(pady=20)
+        button_frame = tk.Frame(input_window, bg=T_COLORS["bg_window"])
+        button_frame.pack(pady=(10, 16))
 
-        ttk.Button(button_frame, text="保存", command=save_data).pack(side=tk.LEFT, padx=10)
-        ttk.Button(button_frame, text="取消", command=input_window.destroy).pack(side=tk.LEFT, padx=10)
+        ttk.Button(button_frame, text="保存", style="Modern.TButton", command=save_data).pack(side=tk.LEFT, padx=10)
+        ttk.Button(button_frame, text="取消", style="Secondary.TButton", command=input_window.destroy).pack(side=tk.LEFT, padx=10)
+
+        # 内容自适应：先布局再按实际需求计算尺寸并居中
+        input_window.update_idletasks()
+        _content_fit_geometry(input_window, self.root, 440, 380, min_w=360, min_h=280)
 
     def save_config(self):
         """保存配置"""
@@ -2086,6 +2262,9 @@ class FinalForecastApp:
                 '年度增长率': self.growth_rates.get(year, 0) if hasattr(self, 'growth_rates') else 0
             })
 
+        # 预测数据刷新后自动适配列宽（表头与单元格内容取较长者）
+        self._auto_fit_columns(self.forecast_tree, ["年份", "月份", "旅客运输量", "春运天数", "增长率"])
+
     def plot_forecast(self, history, forecast):
         """绘制预测图表"""
         # 保存数据以供缩放时刷新
@@ -2153,7 +2332,6 @@ class FinalForecastApp:
 
         self.forecast_ax.set_xlabel('日期', fontsize=label_size)
         self.forecast_ax.set_ylabel('旅客运输量', fontsize=label_size)
-
         model_name = {
             'ensemble': '融合模型',
             'hw': 'Holt-Winters',
@@ -2166,7 +2344,17 @@ class FinalForecastApp:
             title += f" · 回测推荐权重 HW {self.last_rec_info['weights'].get('hw', 0.5):.2f}/SA {self.last_rec_info['weights'].get('sarima', 0.5):.2f}"
         self.forecast_ax.set_title(title, fontsize=title_size, fontweight='bold')
         self.forecast_ax.tick_params(axis="both", labelsize=tick_size)
-        self.forecast_ax.legend(loc='best', fontsize=legend_size)
+        # 日期刻度自动疏密（防重叠）
+        try:
+            import matplotlib.dates as mdates
+            self.forecast_ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            self.forecast_ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
+        except Exception:
+            pass
+        # 图例项多时两列排布防遮挡
+        handles, labels = self.forecast_ax.get_legend_handles_labels()
+        ncol = 2 if len(labels) >= 4 else 1
+        self.forecast_ax.legend(loc='best', fontsize=legend_size, ncol=ncol)
         self.forecast_ax.grid(True, alpha=0.3)
         
         self.forecast_fig.tight_layout()
@@ -2200,7 +2388,7 @@ class FinalForecastApp:
                     # 写入说明
                     df_description = pd.DataFrame({
                         '说明': [
-                            '数据来源：民航旅客运输量预测系统 V1.2',
+                            '数据来源：民航旅客运输量预测系统 V1.3',
                             f'导出时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
                             f'预测模型：{self.model_var.get()}',
                             f'年度增长率：{self.lunar_config["annual_growth_rate"] * 100:.2f}%',
@@ -2578,6 +2766,15 @@ class FinalForecastApp:
         self.analysis_axs[1, 1].tick_params(labelsize=tick_size)
         self.analysis_axs[1, 1].grid(True, alpha=0.25, color=T_COLORS["border"])
 
+        # 四子图统一日期刻度自动疏密（防重叠）
+        try:
+            import matplotlib.dates as mdates
+            for _ax in self.analysis_axs.flat:
+                _ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                _ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
+        except Exception:
+            pass
+
         # 调整布局
         self.analysis_fig.tight_layout()
         self.analysis_canvas.draw()
@@ -2641,7 +2838,6 @@ class FinalForecastApp:
         """管理控制台：自动接入官方渠道数据源（GDP / ASK）并纳入预测"""
         win = tk.Toplevel(self.root)
         win.title("管理控制台 - 官方数据源接入")
-        _apply_geometry(win, 880, 660, parent=self.root, min_w=680, min_h=520)
         win.configure(bg=T_COLORS["bg_window"])
         win.transient(self.root)
 
@@ -2755,6 +2951,9 @@ class FinalForecastApp:
         update_btn.configure(command=do_update)
         refresh_status()
         draw_preview()
+        # 几何：内嵌 matplotlib 画布的 req 尺寸(=figsize×dpi) 不代表真实内容需求,
+        # 采用固定基础尺寸 + 屏幕约束 + 相对父窗口居中（预览图区 pack expand 自动伸缩）
+        _apply_geometry(win, 920, 720, parent=self.root, min_w=680, min_h=520)
         self.update_status("管理控制台已打开")
 
     def _toggle_external(self):
@@ -2782,7 +2981,6 @@ class FinalForecastApp:
         """算法使用手册：点击查看（含已移除算法说明）"""
         win = tk.Toplevel(self.root)
         win.title("算法使用手册")
-        _apply_geometry(win, 980, 700, parent=self.root, min_w=720, min_h=520)
         win.configure(bg=T_COLORS["bg_window"])
         win.transient(self.root)
 
@@ -2834,6 +3032,10 @@ class FinalForecastApp:
         if list_tree.get_children():
             list_tree.selection_set(list_tree.get_children()[0])
             show_manual(list_tree.get_children()[0])
+
+        # 内容自适应：先布局再按实际需求计算尺寸并居中
+        win.update_idletasks()
+        _content_fit_geometry(win, self.root, 1000, 740, min_w=720, min_h=520)
 
     # ========== 马尔可夫状态转移分析 ==========
 

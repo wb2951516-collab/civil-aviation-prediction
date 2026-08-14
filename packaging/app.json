@@ -3,7 +3,7 @@
   "display_name": "民航旅客运输量预测系统",
   "bundle_id": "com.example.capm",
   "publisher": "Your Company",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "exe_name_windows": "CAPM.exe",
   "icon_windows_ico": "assets/plane.ico",
   "data_dir_windows": "%APPDATA%/CAPM",

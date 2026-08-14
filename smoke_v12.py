@@ -120,6 +120,11 @@ app.run_forecast()
 root.update()
 checks.append(("干预引擎恢复", len(app.forecast_tree.get_children()) == 12))
 
+# 显式取消 ColumnResizer 的 pending after 回调，避免 destroy 后触发退出噪声
+if hasattr(app, "forecast_resizer"):
+    app.forecast_resizer.shutdown()
+if hasattr(app, "history_resizer"):
+    app.history_resizer.shutdown()
 root.destroy()
 all_ok = True
 for name, ok in checks:
