@@ -272,6 +272,7 @@ def _content_fit_geometry(win, parent, base_w: int, base_h: int, min_w: int = 32
 
 
 def _try_activate_existing_window() -> bool:
+    """激活已运行实例的窗口：FindWindowW 直查 + EnumWindows（含隐藏窗口）兜底。"""
     if os.name != "nt":
         return False
     try:
@@ -280,19 +281,19 @@ def _try_activate_existing_window() -> bool:
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
         user32.FindWindowW.restype = wintypes.HWND
-        user32.ShowWindow.argtypes = [wintypes.HWND, wintypes.INT]
-        user32.ShowWindow.restype = wintypes.BOOL
-        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        user32.SetForegroundWindow.restype = wintypes.BOOL
 
         hwnd = user32.FindWindowW(None, APP_WINDOW_TITLE)
         if not hwnd:
+            # 窗口可能处于隐藏状态（FindWindowW 不覆盖），枚举所有顶层窗口兜底
+            from capm.single_instance import find_window_by_title
+
+            hwnd = find_window_by_title(APP_WINDOW_TITLE)
+        if not hwnd:
             return False
 
-        SW_RESTORE = 9
-        user32.ShowWindow(hwnd, SW_RESTORE)
-        user32.SetForegroundWindow(hwnd)
-        return True
+        from capm.single_instance import restore_and_foreground
+
+        return restore_and_foreground(hwnd)
     except Exception:
         logging.exception("激活已运行窗口失败")
         return False
@@ -390,7 +391,72 @@ class FinalForecastApp:
         # 创建界面
         self.create_widgets()
 
+        # 窗口关闭协议：点击 X = 彻底退出（清理 pending 回调与资源后销毁主窗口）
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # 命名事件唤醒通道（新启动实例通知本实例恢复窗口）
+        self._wakeup_event = None
+        if os.name == "nt":
+            try:
+                from capm.single_instance import create_wakeup_event
+
+                self._wakeup_event = create_wakeup_event()
+                self.root.after(400, self._poll_wakeup_loop)
+            except Exception:
+                self._wakeup_event = None
+
         self.root.after(10, self.load_sample_data)
+
+    def _on_close(self):
+        """关闭主窗口：彻底退出。
+
+        依次取消列宽组件的 pending after 回调、销毁主窗口（含全部子弹窗与
+        图表画布），mainloop 随即退出；后台线程均为 daemon，不阻塞进程结束。
+        """
+        try:
+            for attr in ("forecast_resizer", "history_resizer"):
+                resizer = getattr(self, attr, None)
+                if resizer is not None and hasattr(resizer, "shutdown"):
+                    try:
+                        resizer.shutdown()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def _poll_wakeup_loop(self):
+        """轮询命名唤醒事件：收到信号则恢复并前置主窗口。"""
+        try:
+            if os.name == "nt" and getattr(self, "_wakeup_event", None):
+                from capm.single_instance import poll_wakeup_event
+
+                if poll_wakeup_event(self._wakeup_event):
+                    self._restore_main_window()
+        except Exception:
+            pass
+        try:
+            if self.root.winfo_exists():
+                self.root.after(400, self._poll_wakeup_loop)
+        except Exception:
+            pass
+
+    def _restore_main_window(self):
+        """恢复并前置主窗口（被新启动实例唤醒时调用）。"""
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            try:
+                self.root.attributes("-topmost", True)
+                self.root.after(250, lambda: self.root.attributes("-topmost", False))
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def show_help_info(self):
         """显示帮助信息"""
@@ -3247,28 +3313,20 @@ def main():
         pass
 
     try:
-        from capm.single_instance import acquire_single_instance_mutex
+        from capm.single_instance import acquire_single_instance_mutex, signal_wakeup_event
 
         if os.name == "nt":
             if not acquire_single_instance_mutex("CAPM_PASSENGER_FORECAST_SINGLE_INSTANCE"):
-                if _try_activate_existing_window():
-                    return
-                tmp = tk.Tk()
-                tmp.withdraw()
-                choice = messagebox.askyesnocancel(
-                    "提示",
-                    "检测到应用已在运行中，但未找到可见窗口。\n\n"
-                    "是：尝试激活已运行窗口\n"
-                    "否：强制启动新实例\n"
-                    "取消：退出",
-                )
-                tmp.destroy()
-                if choice is True:
-                    _try_activate_existing_window()
-                    return
-                if choice is None:
-                    return
-                logging.warning("用户选择强制启动新实例")
+                # 已有实例在运行：双通道唤醒——
+                # ① 命名事件通知旧实例恢复窗口（覆盖窗口隐藏场景）
+                # ② FindWindowW/EnumWindows 直接激活旧窗口（双保险）
+                # 随后本实例退出，绝不产生第二个进程。
+                try:
+                    signal_wakeup_event()
+                except Exception:
+                    pass
+                _try_activate_existing_window()
+                return
     except Exception:
         pass
 
