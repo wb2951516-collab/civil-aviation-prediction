@@ -3320,19 +3320,45 @@ def main():
                 # 已有实例在运行：双通道唤醒——
                 # ① 命名事件通知旧实例恢复窗口（覆盖窗口隐藏场景）
                 # ② FindWindowW/EnumWindows 直接激活旧窗口（双保险）
-                # 随后本实例退出，绝不产生第二个进程。
+                logging.info("[单实例] 检测到已有实例，尝试双通道唤醒")
                 try:
                     signal_wakeup_event()
                 except Exception:
                     pass
-                _try_activate_existing_window()
-                return
+                activated = _try_activate_existing_window()
+                if activated:
+                    logging.info("[单实例] 已唤醒已有实例窗口，本实例退出")
+                    return
+                # 唤醒失败：可能是旧版本退出不彻底留下的僵尸进程（持有互斥量但窗口已销毁）
+                # 不再静默退出——给出明确提示，允许用户选择继续启动新实例（僵尸无窗口无害）
+                logging.warning("[单实例] 唤醒失败，疑似残留的旧版本僵尸进程")
+                try:
+                    tmp = tk.Tk()
+                    tmp.withdraw()
+                    choice = messagebox.askyesno(
+                        "检测到残留进程",
+                        "检测到另一个 CAPM 进程持有启动锁，但未能恢复其窗口。\n\n"
+                        "这通常是旧版本程序退出不彻底留下的残留进程。\n\n"
+                        "是否仍继续启动新实例？\n"
+                        "（建议先通过任务管理器结束残留的 CAPM 进程）",
+                    )
+                    tmp.destroy()
+                    if not choice:
+                        logging.info("[单实例] 用户取消启动（存在残留进程）")
+                        return
+                    logging.warning("[单实例] 用户选择在残留进程存在时继续启动新实例")
+                except Exception:
+                    # 极端情况下无法弹窗：写入日志并继续启动，避免再次静默退出
+                    logging.warning("[单实例] 提示弹窗失败，继续启动新实例")
     except Exception:
         pass
+
+    logging.info("[启动] 单实例检查通过，创建主窗口")
 
     try:
         root = tk.Tk()
         app = FinalForecastApp(root)
+        logging.info("[启动] 主窗口已创建，进入主循环")
         _bring_window_to_front(root)
         root.mainloop()
     except Exception:
