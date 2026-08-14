@@ -1,9 +1,9 @@
 #define AppName "CAPM"
 #define AppDisplayName "民航旅客运输量预测系统"
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.3.0"
 #endif
-#define AppPublisher "Your Company"
+#define AppPublisher "CAPM Project"
 #define AppExeName "CAPM.exe"
 #define AppId "{{B03C64AE-9D5A-4C90-88B5-9A9A1BA5E0D2}}"
 
@@ -27,7 +27,7 @@ SetupIconFile=..\..\assets\plane.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 
 [Languages]
-Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimplified"; MessagesFile: "deps\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

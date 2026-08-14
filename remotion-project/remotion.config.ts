@@ -1,1 +1,0 @@
-// Remotion configuration file

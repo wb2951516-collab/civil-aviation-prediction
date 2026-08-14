@@ -220,8 +220,10 @@ def sarimax_intervention_forecast(
     from capm.holiday import build_intervention_exog
 
     ts = ts.dropna()
-    if len(ts) < 8:
-        return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "too_short"})
+    if len(ts) < 24:
+        # 干预建模需要足够样本：短数据下 SARIMAX + 多列 exog 收敛极慢且不可靠，
+        # 直接回退简单季节性（与 sarima_forecast 的 len<8 回退同理，但阈值更严格）
+        return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "too_short_for_intervention"})
 
     spring_festival_dates = spring_festival_dates or {}
     future_idx = _future_month_index(ts, periods)
