@@ -38,6 +38,7 @@ remotion-project/out/
 # ===== IDE 与工具配置 =====
 .idea/
 .vscode/
+.qoder/
 *.swp
 *.swo
 .trae/
