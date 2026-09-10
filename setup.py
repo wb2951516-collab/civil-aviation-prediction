@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="CAPM",
-    version="1.3.0",
+    version="1.3.2",
     packages=find_packages(),
     py_modules=["CAPM"],
     install_requires=[
@@ -19,6 +19,6 @@ setup(
             "capm=CAPM:main",
         ],
     },
-    author="User",
+    author="SuperM",
     description="Civil aviation passenger traffic volume prediction model",
 )

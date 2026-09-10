@@ -1,9 +1,9 @@
 #define AppName "CAPM"
 #define AppDisplayName "民航旅客运输量预测系统"
 #ifndef AppVersion
-  #define AppVersion "1.3.0"
+  #define AppVersion "1.3.2"
 #endif
-#define AppPublisher "CAPM Project"
+#define AppPublisher "SuperM"
 #define AppExeName "CAPM.exe"
 #define AppId "{{B03C64AE-9D5A-4C90-88B5-9A9A1BA5E0D2}}"
 
