@@ -8,6 +8,10 @@
 
 A desktop application for forecasting monthly civil aviation passenger traffic: curated statistical models + an intervention engine + automatic ensemble weighting via Bayesian Model Averaging (BMA), with built-in walk-forward backtesting, scenario analysis, and a ready-to-use GUI.
 
+https://github.com/user-attachments/assets/b8ae0fcb-2463-436f-8453-cf0a3b5714d4
+
+> Silent demo above. The narrated version is available as a [Release asset](https://github.com/wb2951516-collab/civil-aviation-prediction/releases/tag/v1.3.2).
+
 ### Highlights
 
 - **Curated model set** — Holt-Winters and SARIMA/SARIMAX, selected through empirical backtesting (weaker models such as linear regression were deliberately removed)

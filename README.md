@@ -9,7 +9,9 @@
 
 面向民航运输规划场景的月度旅客运输量预测系统：精选统计模型 + 干预引擎 + 贝叶斯模型平均（BMA）自动融合，内置量化回测与情景分析，提供开箱即用的桌面 GUI。
 
-https://github.com/wb2951516-collab/civil-aviation-prediction/releases/download/v1.3.2/CAPM_Narrated_3D.mp4
+https://github.com/user-attachments/assets/b8ae0fcb-2463-436f-8453-cf0a3b5714d4
+
+> 上方为功能演示（静音），完整有声解说版见 [Release 附件](https://github.com/wb2951516-collab/civil-aviation-prediction/releases/tag/v1.3.2)。
 
 ---
 
