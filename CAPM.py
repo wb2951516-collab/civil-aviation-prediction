@@ -43,7 +43,7 @@ from capm.holiday import (
 from capm.logging_setup import configure_logging
 from capm.manuals import MANUALS, REMOVED_NOTES
 from capm.markov import analyze_regimes
-from capm.models import ensemble_forecast, holt_winters_forecast, sarima_forecast, sarimax_intervention_forecast, simple_seasonal_forecast
+from capm.models import ensemble_forecast, holt_winters_forecast, kalman_forecast, kalman_intervention_forecast, sarima_forecast, sarimax_intervention_forecast, simple_seasonal_forecast
 from capm.theme import COLORS as T_COLORS
 from capm.theme import apply_theme, card_frame
 
@@ -722,7 +722,7 @@ class FinalForecastApp:
         tk.Label(title_frame, text="民航旅客运输量预测系统",
                  font=('微软雅黑', 20, 'bold'), bg='#f0f0f0').pack()
 
-        tk.Label(title_frame, text="春运比例拆分 + 年度增长率校准 + 精选算法集成 (V1.3)",
+        tk.Label(title_frame, text="春运比例拆分 + 干预引擎集成 + 卡尔曼滤波 (V1.4)",
                  font=('微软雅黑', 11), bg='#f0f0f0', fg='#666').pack()
 
         # 控制面板（卡片化分组）
@@ -746,9 +746,9 @@ class FinalForecastApp:
         right_controls = card_frame(control_frame, "模型与预测")
         right_controls.pack(side=tk.RIGHT)
 
-        # 精选算法集合（V1.1：线性回归已移除，详见算法手册）
+        # 精选算法集合（V1.4：新增卡尔曼 UC 状态空间成员，详见算法手册）
         self.model_var = tk.StringVar(value="ensemble")
-        models = [("融合模型", "ensemble"), ("Holt-Winters", "hw"), ("SARIMA", "sarima")]
+        models = [("融合模型", "ensemble"), ("Holt-Winters", "hw"), ("SARIMA", "sarima"), ("卡尔曼滤波", "kalman")]
         for text, value in models:
             ttk.Radiobutton(right_controls, text=text, variable=self.model_var,
                             value=value).pack(side=tk.LEFT, padx=3, pady=4)
@@ -920,6 +920,11 @@ class FinalForecastApp:
         ttk.Spinbox(weight_frame, from_=0.0, to=1.0, increment=0.05,
                     textvariable=self.sarima_weight_var, width=5).pack(side=tk.LEFT, padx=2)
 
+        tk.Label(weight_frame, text="卡尔曼:", bg=T_COLORS["bg_card"]).pack(side=tk.LEFT, padx=5)
+        self.kalman_weight_var = tk.DoubleVar(value=float(weights.get("kalman", 0.2)))
+        ttk.Spinbox(weight_frame, from_=0.0, to=1.0, increment=0.05,
+                    textvariable=self.kalman_weight_var, width=5).pack(side=tk.LEFT, padx=2)
+
         tk.Label(weight_frame, text="(权重自动归一化，回测可推荐)", bg=T_COLORS["bg_card"],
                  fg=T_COLORS["text_sub"]).pack(side=tk.LEFT, padx=8)
 
@@ -945,6 +950,10 @@ class FinalForecastApp:
         hw_cfg = self.model_cfg.get("holt_winters", {}) if isinstance(self.model_cfg.get("holt_winters", {}), dict) else {}
         self.hw_auto_var = tk.BooleanVar(value=bool(hw_cfg.get("auto_tune", False)))
         ttk.Checkbutton(advanced_frame, text="HW自动调参", variable=self.hw_auto_var).pack(side=tk.LEFT, padx=10)
+
+        kalman_cfg = self.model_cfg.get("kalman", {}) if isinstance(self.model_cfg.get("kalman", {}), dict) else {}
+        self.kalman_auto_var = tk.BooleanVar(value=bool(kalman_cfg.get("auto_tune", False)))
+        ttk.Checkbutton(advanced_frame, text="卡尔曼自动调参", variable=self.kalman_auto_var).pack(side=tk.LEFT, padx=10)
 
         ttk.Button(advanced_frame, text="模型回测评估", style="Secondary.TButton",
                    command=self.run_backtest).pack(side=tk.RIGHT, padx=5)
@@ -1691,6 +1700,7 @@ class FinalForecastApp:
         if hasattr(self, "hw_weight_var"):
             model_cfg["weights"]["hw"] = float(self.hw_weight_var.get())
             model_cfg["weights"]["sarima"] = float(self.sarima_weight_var.get())
+            model_cfg["weights"]["kalman"] = float(self.kalman_weight_var.get()) if hasattr(self, "kalman_weight_var") else float(model_cfg["weights"].get("kalman", 0.2))
             model_cfg["weights"].pop("linear", None)
 
         model_cfg.setdefault("sarima", {})
@@ -1699,6 +1709,9 @@ class FinalForecastApp:
         model_cfg.setdefault("holt_winters", {})
         if hasattr(self, "hw_auto_var"):
             model_cfg["holt_winters"]["auto_tune"] = bool(self.hw_auto_var.get())
+        model_cfg.setdefault("kalman", {})
+        if hasattr(self, "kalman_auto_var"):
+            model_cfg["kalman"]["auto_tune"] = bool(self.kalman_auto_var.get())
 
         return {
             "holiday": holiday_cfg,
@@ -1747,6 +1760,8 @@ class FinalForecastApp:
         if hasattr(self, "hw_weight_var"):
             self.hw_weight_var.set(float(weights.get("hw", 0.5)))
             self.sarima_weight_var.set(float(weights.get("sarima", 0.5)))
+            if hasattr(self, "kalman_weight_var"):
+                self.kalman_weight_var.set(float(weights.get("kalman", 0.2)))
 
         if hasattr(self, "weight_mode_var"):
             wm = self.model_cfg.get("weight_mode", "auto")
@@ -1762,6 +1777,9 @@ class FinalForecastApp:
         if hasattr(self, "hw_auto_var"):
             hw_cfg = self.model_cfg.get("holt_winters", {}) if isinstance(self.model_cfg.get("holt_winters", {}), dict) else {}
             self.hw_auto_var.set(bool(hw_cfg.get("auto_tune", False)))
+        if hasattr(self, "kalman_auto_var"):
+            kalman_cfg = self.model_cfg.get("kalman", {}) if isinstance(self.model_cfg.get("kalman", {}), dict) else {}
+            self.kalman_auto_var.set(bool(kalman_cfg.get("auto_tune", False)))
 
     def open_spring_travel_preview(self):
         try:
@@ -1944,13 +1962,15 @@ class FinalForecastApp:
                 try:
                     profile = self.collect_profile_from_ui() if hasattr(self, "collect_profile_from_ui") else dict(self.profile)
                     profile.setdefault("spring_festival_dates", dict(self.spring_festival_dates))
-                    bt = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors) if len(ts) >= 24 else {"error": "历史数据不足"}
+                    bt = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors, members=self._active_members()) if len(ts) >= 24 else {"error": "历史数据不足"}
                     if "error" not in bt:
                         rec = bt.get("recommendation") or {}
                         model_type = str(rec.get("model", "ensemble"))
                         weights = rec.get("weights") or recommend_weights_from_backtest(bt)
                         self.hw_weight_var.set(round(float(weights.get("hw", 0.5)), 4))
                         self.sarima_weight_var.set(round(float(weights.get("sarima", 0.5)), 4))
+                        if hasattr(self, "kalman_weight_var") and "kalman" in weights:
+                            self.kalman_weight_var.set(round(float(weights.get("kalman", 0.0)), 4))
                         self.model_cfg.setdefault("weights", {})
                         self.model_cfg["weights"].update({k: float(v) for k, v in weights.items()})
                         rec_info = {
@@ -1979,6 +1999,8 @@ class FinalForecastApp:
                 forecast = self.holt_winters_forecast(ts)
             elif model_type == "sarima":
                 forecast = self.sarimax_intervention_forecast(ts, factors) if use_intervention else self.sarima_forecast(ts, factors)
+            elif model_type == "kalman":
+                forecast = self.kalman_intervention_forecast(ts, factors) if use_intervention else self.kalman_forecast(ts, factors)
             else:
                 forecast = self.intervention_forecast(ts, factors) if use_intervention else self.ensemble_forecast(ts, factors)
 
@@ -2042,12 +2064,14 @@ class FinalForecastApp:
 
             engine = str(getattr(self, "engine_var", tk.StringVar(value="intervention")).get() or "intervention")
             model_cfg["engine"] = engine
+            model_cfg.setdefault("kalman", {})
+            model_cfg["kalman"]["auto_tune"] = bool(self.kalman_auto_var.get()) if hasattr(self, "kalman_auto_var") else bool(model_cfg.get("kalman", {}).get("auto_tune", False))
 
             profile["holiday"] = holiday_cfg
             profile["growth"] = growth_cfg
             profile["model"] = model_cfg
 
-            result = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors, engine=engine)
+            result = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors, engine=engine, members=self._active_members())
             if "error" in result:
                 messagebox.showerror("回测失败", str(result["error"]))
                 return
@@ -2058,22 +2082,41 @@ class FinalForecastApp:
             if hasattr(self, "hw_weight_var"):
                 self.hw_weight_var.set(round(float(weights.get("hw", 0.5)), 4))
                 self.sarima_weight_var.set(round(float(weights.get("sarima", 0.5)), 4))
+                if hasattr(self, "kalman_weight_var") and "kalman" in weights:
+                    self.kalman_weight_var.set(round(float(weights.get("kalman", 0.0)), 4))
 
             summary = result.get("summary", {})
             rec = result.get("recommendation") or {}
             engine_label = "干预集成" if engine == "intervention" else "传统管线"
+            rows = [("hw", "Holt-Winters"), ("sarima", "SARIMA" + ("(干预)" if engine == "intervention" else ""))]
+            if "kalman" in summary:
+                rows.append(("kalman", "卡尔曼UC" + ("(干预)" if engine == "intervention" else "")))
+            rows.append(("ensemble", "融合模型"))
             text = f"回测评估(滚动12个月 · 引擎: {engine_label})：\n\n"
-            for k, name in [("hw", "Holt-Winters"), ("sarima", "SARIMA" + ("(干预)" if engine == "intervention" else "")), ("ensemble", "融合模型")]:
+            for k, name in rows:
                 s = summary.get(k, {})
                 text += f"{name} - MAPE: {s.get('mape', float('nan')):.2f}%, RMSE: {s.get('rmse', float('nan')):.2f}, "
                 text += f"MDA: {s.get('mda', float('nan')):.2f}, TheilU: {s.get('theil_u', float('nan')):.2f}\n"
             text += f"\n推荐模型：{rec.get('model', 'ensemble')}（权重方法：{rec.get('weight_method', '回测')}）\n"
-            text += f"推荐权重：HW={weights.get('hw', 0.5):.3f}, SARIMA={weights.get('sarima', 0.5):.3f}\n"
+            weight_parts = [f"HW={weights.get('hw', 0.5):.3f}", f"SARIMA={weights.get('sarima', 0.5):.3f}"]
+            if "kalman" in weights:
+                weight_parts.append(f"卡尔曼={weights.get('kalman', 0.0):.3f}")
+            text += f"推荐权重：{', '.join(weight_parts)}\n"
             text += f"\n说明：MAPE 越低越好；MDA 为方向命中率（越高越好）；Theil U<1 表示优于朴素基准。"
 
             messagebox.showinfo("模型回测评估", text)
         except Exception as e:
             messagebox.showerror("回测失败", str(e))
+
+    def _active_members(self):
+        """当前参与回测/融合的成员列表（卡尔曼权重 > 0 时纳入）"""
+        members = ["hw", "sarima"]
+        try:
+            if hasattr(self, "kalman_weight_var") and float(self.kalman_weight_var.get()) > 0:
+                members.append("kalman")
+        except Exception:
+            pass
+        return members
 
     def _prepare_exog(self, ts, factors, periods: int = 12):
         """将月度因子拆分为训练期与预测期外生变量（与 SARIMAX 对齐）"""
@@ -2110,16 +2153,22 @@ class FinalForecastApp:
             return None
 
     def intervention_forecast(self, ts, factors=None):
-        """V2 干预集成引擎: HW + SARIMAX(节假日/COVID exog), 无后处理。
+        """V2 干预集成引擎: HW + SARIMAX(节假日/COVID exog) + 卡尔曼UC(可选), 无后处理。
 
         解决两大失真源 (融入来源: V1.1.1 分支):
           ① 季节性双重叠加 → 节假日入 SARIMAX exog, 不再后处理乘法
           ② COVID 结构断点 → covid_step + covid_recovery 干预变量显式建模
         增长率仅告警不强制覆盖 (apply_growth_sanity_check)。
+        V1.4: 卡尔曼权重 > 0 时作为第三成员加入融合（回测实证: 集成 MAPE -10.3%）。
         """
-        weights = {"hw": float(self.hw_weight_var.get()), "sarima": float(self.sarima_weight_var.get())}
+        weights = {
+            "hw": float(self.hw_weight_var.get()),
+            "sarima": float(self.sarima_weight_var.get()),
+            "kalman": float(self.kalman_weight_var.get()) if hasattr(self, "kalman_weight_var") else 0.0,
+        }
         sarima_cfg = self.model_cfg.get("sarima", {}) if isinstance(self.model_cfg.get("sarima", {}), dict) else {}
         hw_cfg = self.model_cfg.get("holt_winters", {}) if isinstance(self.model_cfg.get("holt_winters", {}), dict) else {}
+        kalman_cfg = self.model_cfg.get("kalman", {}) if isinstance(self.model_cfg.get("kalman", {}), dict) else {}
         exog_full = self._prepare_exog_full(ts, factors)
 
         hw = holt_winters_forecast(
@@ -2140,21 +2189,38 @@ class FinalForecastApp:
             seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
             exog_data=exog_full,
         )
+        kal = None
+        if weights.get("kalman", 0.0) > 0:
+            kal = kalman_intervention_forecast(
+                ts,
+                periods=12,
+                spring_festival_dates=dict(self.spring_festival_dates),
+                holiday_cfg=dict(self.holiday_cfg),
+                include_covid=True,
+                exog_data=exog_full,
+                auto_tune=bool(self.kalman_auto_var.get()) if hasattr(self, "kalman_auto_var") else bool(kalman_cfg.get("auto_tune", False)),
+            )
         w_hw = float(weights.get("hw", 0.5))
         w_s = float(weights.get("sarima", 0.5))
-        total = w_hw + w_s
+        w_k = float(weights.get("kalman", 0.0)) if kal is not None else 0.0
+        total = w_hw + w_s + w_k
         if total <= 0:
             w_hw = w_s = 0.5
+            w_k = 0.0
             total = 1.0
-        w_hw, w_s = w_hw / total, w_s / total
+        w_hw, w_s, w_k = w_hw / total, w_s / total, w_k / total
         idx = hw.forecast.index
         ens = (hw.forecast.reindex(idx).astype(float) * w_hw) + (sar.forecast.reindex(idx).astype(float) * w_s)
+        if kal is not None and w_k > 0:
+            ens = ens + (kal.forecast.reindex(idx).astype(float) * w_k)
         ens = ens.clip(lower=0.0)
         self.model_results = {
             "Holt-Winters": hw.forecast,
             "SARIMAX-干预": sar.forecast,
             "Ensemble": ens,
         }
+        if kal is not None:
+            self.model_results["卡尔曼UC"] = kal.forecast
         self.model_conf_int = sar.meta.get("conf_int")
         return ens
 
@@ -2202,9 +2268,14 @@ class FinalForecastApp:
         return unchanged
 
     def ensemble_forecast(self, ts, factors=None):
-        weights = {"hw": float(self.hw_weight_var.get()), "sarima": float(self.sarima_weight_var.get())}
+        weights = {
+            "hw": float(self.hw_weight_var.get()),
+            "sarima": float(self.sarima_weight_var.get()),
+            "kalman": float(self.kalman_weight_var.get()) if hasattr(self, "kalman_weight_var") else 0.0,
+        }
         sarima_cfg = self.model_cfg.get("sarima", {}) if isinstance(self.model_cfg.get("sarima", {}), dict) else {}
         hw_cfg = self.model_cfg.get("holt_winters", {}) if isinstance(self.model_cfg.get("holt_winters", {}), dict) else {}
+        kalman_cfg = self.model_cfg.get("kalman", {}) if isinstance(self.model_cfg.get("kalman", {}), dict) else {}
         exog_train, exog_future = self._prepare_exog(ts, factors)
         out, components = ensemble_forecast(
             ts,
@@ -2213,6 +2284,7 @@ class FinalForecastApp:
             auto_tune_hw=bool(self.hw_auto_var.get()) if hasattr(self, "hw_auto_var") else bool(hw_cfg.get("auto_tune", False)),
             sarima_params={"order": sarima_cfg.get("order", [1, 1, 1]), "seasonal_order": sarima_cfg.get("seasonal_order", [1, 1, 1, 12])},
             hw_params={"trend": hw_cfg.get("trend", "add"), "seasonal": hw_cfg.get("seasonal", "add"), "seasonal_periods": hw_cfg.get("seasonal_periods", 12)},
+            kalman_params={"auto_tune": bool(self.kalman_auto_var.get()) if hasattr(self, "kalman_auto_var") else bool(kalman_cfg.get("auto_tune", False))},
             periods=12,
             exog=exog_train,
             exog_future=exog_future,
@@ -2222,6 +2294,8 @@ class FinalForecastApp:
             "SARIMA": components["SARIMA"].forecast,
             "Ensemble": out.forecast,
         }
+        if "卡尔曼UC" in components:
+            self.model_results["卡尔曼UC"] = components["卡尔曼UC"].forecast
         self.model_conf_int = components["SARIMA"].meta.get("conf_int")
         return out.forecast
 
@@ -2249,6 +2323,36 @@ class FinalForecastApp:
             auto_tune=bool(self.sarima_auto_var.get()) if hasattr(self, "sarima_auto_var") else bool(sarima_cfg.get("auto_tune", False)),
             exog=exog_train,
             exog_future=exog_future,
+        )
+        self.model_conf_int = out.meta.get("conf_int")
+        return out.forecast
+
+    def kalman_intervention_forecast(self, ts, factors=None):
+        """单模型干预引擎: 卡尔曼UC(节假日/COVID exog), 无后处理"""
+        kalman_cfg = self.model_cfg.get("kalman", {}) if isinstance(self.model_cfg.get("kalman", {}), dict) else {}
+        exog_full = self._prepare_exog_full(ts, factors)
+        out = kalman_intervention_forecast(
+            ts,
+            periods=12,
+            spring_festival_dates=dict(self.spring_festival_dates),
+            holiday_cfg=dict(self.holiday_cfg),
+            include_covid=True,
+            exog_data=exog_full,
+            auto_tune=bool(self.kalman_auto_var.get()) if hasattr(self, "kalman_auto_var") else bool(kalman_cfg.get("auto_tune", False)),
+        )
+        self.model_conf_int = out.meta.get("conf_int")
+        return out.forecast
+
+    def kalman_forecast(self, ts, factors=None):
+        """单模型: 卡尔曼UC状态空间（传统引擎, 可选外生变量）"""
+        kalman_cfg = self.model_cfg.get("kalman", {}) if isinstance(self.model_cfg.get("kalman", {}), dict) else {}
+        exog_train, exog_future = self._prepare_exog(ts, factors)
+        out = kalman_forecast(
+            ts,
+            periods=12,
+            exog=exog_train,
+            exog_future=exog_future,
+            auto_tune=bool(self.kalman_auto_var.get()) if hasattr(self, "kalman_auto_var") else bool(kalman_cfg.get("auto_tune", False)),
         )
         self.model_conf_int = out.meta.get("conf_int")
         return out.forecast
@@ -2402,13 +2506,16 @@ class FinalForecastApp:
         model_name = {
             'ensemble': '融合模型',
             'hw': 'Holt-Winters',
-            'sarima': 'SARIMA'
+            'sarima': 'SARIMA',
+            'kalman': '卡尔曼滤波'
         }.get(self.model_var.get(), '融合模型')
         mode = str(getattr(self, "model_mode_var", tk.StringVar(value="auto")).get() or "auto")
         mode_text = "自动推荐" if mode == "auto" else "手动选择"
         title = f'旅客运输量预测 ({model_name} · {mode_text})'
         if getattr(self, "last_rec_info", None):
             title += f" · 回测推荐权重 HW {self.last_rec_info['weights'].get('hw', 0.5):.2f}/SA {self.last_rec_info['weights'].get('sarima', 0.5):.2f}"
+            if 'kalman' in (self.last_rec_info.get('weights') or {}):
+                title += f"/KF {self.last_rec_info['weights'].get('kalman', 0.0):.2f}"
         self.forecast_ax.set_title(title, fontsize=title_size, fontweight='bold')
         self.forecast_ax.tick_params(axis="both", labelsize=tick_size)
         # 日期刻度自动疏密（防重叠）
@@ -2455,7 +2562,7 @@ class FinalForecastApp:
                     # 写入说明
                     df_description = pd.DataFrame({
                         '说明': [
-                            '数据来源：民航旅客运输量预测系统 V1.3',
+                            '数据来源：民航旅客运输量预测系统 V1.4',
                             f'导出时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
                             f'预测模型：{self.model_var.get()}',
                             f'年度增长率：{self.lunar_config["annual_growth_rate"] * 100:.2f}%',
@@ -3178,6 +3285,17 @@ class FinalForecastApp:
         self.status_bar.config(text=f"状态: {message}")
 
 
+def _set_window_icon(root):
+    """设置主窗口图标（源码运行与 PyInstaller 打包运行均生效）"""
+    try:
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        icon_path = os.path.join(base, "assets", "airCAPM.ico")
+        if os.path.exists(icon_path):
+            root.iconbitmap(icon_path)
+    except Exception:
+        logging.debug("窗口图标设置失败", exc_info=True)
+
+
 def main():
     """主函数"""
     try:
@@ -3358,6 +3476,7 @@ def main():
 
     try:
         root = tk.Tk()
+        _set_window_icon(root)
         app = FinalForecastApp(root)
         logging.info("[启动] 主窗口已创建，进入主循环")
         _bring_window_to_front(root)

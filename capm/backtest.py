@@ -127,18 +127,29 @@ def rolling_backtest(
     min_train: int = 24,
     factors: Any = None,
     engine: str = "intervention",
+    members: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """滚动窗口回测（walk-forward）。
 
-    对精选模型集合（Holt-Winters / SARIMA / 融合）逐窗口评估，
+    对精选模型集合（Holt-Winters / SARIMA / 卡尔曼 / 融合）逐窗口评估，
     返回汇总指标、逐窗口误差（供 BMA 使用）与推荐结论。
 
     engine: "intervention"(默认, 节假日/COVID 入 SARIMAX exog, 无后处理)
             | "legacy"(后处理乘法效应 + 年度增长强制覆盖, 供对比)
+    members: 参与回测的单模型成员列表；缺省从 profile.model.members 读取，
+             再缺省为 ["hw", "sarima"]（V1.3 兼容）。可选值 hw/sarima/kalman。
     """
     import pandas as pd
 
-    from capm.models import ForecastOutput, ensemble_forecast, holt_winters_forecast, sarima_forecast, sarimax_intervention_forecast
+    from capm.models import (
+        ForecastOutput,
+        ensemble_forecast,
+        holt_winters_forecast,
+        kalman_forecast,
+        kalman_intervention_forecast,
+        sarima_forecast,
+        sarimax_intervention_forecast,
+    )
 
     holiday_cfg = profile.get("holiday", {})
     growth_cfg = profile.get("growth", {})
@@ -147,11 +158,20 @@ def rolling_backtest(
 
     use_intervention = str(engine).lower() != "legacy"
 
+    if members is None:
+        cfg_members = model_cfg.get("members")
+        members = [str(m) for m in cfg_members] if cfg_members else ["hw", "sarima"]
+    members = [m for m in members if m in ("hw", "sarima", "kalman")] or ["hw", "sarima"]
+    if "hw" not in members:
+        members = ["hw"] + members
+
     sarima_cfg = model_cfg.get("sarima", {})
     hw_cfg = model_cfg.get("holt_winters", {})
+    kalman_cfg = model_cfg.get("kalman", {})
 
-    results: Dict[str, List[MetricResult]] = {"hw": [], "sarima": [], "ensemble": []}
-    errors: Dict[str, List[np.ndarray]] = {"hw": [], "sarima": [], "ensemble": []}
+    keys = list(members) + ["ensemble"]
+    results: Dict[str, List[MetricResult]] = {k: [] for k in keys}
+    errors: Dict[str, List[np.ndarray]] = {k: [] for k in keys}
     windows: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
 
     total_len = len(ts)
@@ -174,6 +194,8 @@ def rolling_backtest(
         else:
             exog_train = exog_test = None
 
+        member_preds: Dict[str, Any] = {}
+
         hw_out = holt_winters_forecast(
             train,
             periods=len(test),
@@ -190,29 +212,8 @@ def rolling_backtest(
                     exog_full = pd.concat([exog_train, exog_test])
                 except Exception:
                     exog_full = None
-            sarima_out = sarimax_intervention_forecast(
-                train,
-                periods=len(test),
-                spring_festival_dates=spring_festival_dates,
-                holiday_cfg=holiday_cfg,
-                include_covid=True,
-                order=tuple(sarima_cfg.get("order", (1, 1, 1))),
-                seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
-                exog_data=exog_full,
-            )
-        else:
-            sarima_out = sarima_forecast(
-                train,
-                periods=len(test),
-                order=tuple(sarima_cfg.get("order", (1, 1, 1))),
-                seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
-                auto_tune=bool(sarima_cfg.get("auto_tune", False)),
-                exog=exog_train,
-                exog_future=exog_test,
-            )
 
         if use_intervention:
-            # 干预引擎: 节假日/COVID 已在 exog 建模, 不做后处理
             def post_process(out: ForecastOutput):
                 return out.forecast
         else:
@@ -225,16 +226,58 @@ def rolling_backtest(
                 s2, _ = apply_annual_growth_adjustment(s, float(growth_cfg.get("annual_growth_rate", 0.027)), hist_total)
                 return s2
 
-        hw_pred = post_process(hw_out).reindex(test_index)
-        sarima_pred = post_process(sarima_out).reindex(test_index)
+        if "hw" in members:
+            member_preds["hw"] = post_process(hw_out).reindex(test_index)
+
+        if "sarima" in members:
+            if use_intervention:
+                sarima_out = sarimax_intervention_forecast(
+                    train,
+                    periods=len(test),
+                    spring_festival_dates=spring_festival_dates,
+                    holiday_cfg=holiday_cfg,
+                    include_covid=True,
+                    order=tuple(sarima_cfg.get("order", (1, 1, 1))),
+                    seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
+                    exog_data=exog_full,
+                )
+            else:
+                sarima_out = sarima_forecast(
+                    train,
+                    periods=len(test),
+                    order=tuple(sarima_cfg.get("order", (1, 1, 1))),
+                    seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
+                    auto_tune=bool(sarima_cfg.get("auto_tune", False)),
+                    exog=exog_train,
+                    exog_future=exog_test,
+                )
+            member_preds["sarima"] = post_process(sarima_out).reindex(test_index)
+
+        if "kalman" in members:
+            if use_intervention:
+                kalman_out = kalman_intervention_forecast(
+                    train,
+                    periods=len(test),
+                    spring_festival_dates=spring_festival_dates,
+                    holiday_cfg=holiday_cfg,
+                    include_covid=True,
+                    exog_data=exog_full,
+                    auto_tune=bool(kalman_cfg.get("auto_tune", False)),
+                )
+            else:
+                kalman_out = kalman_forecast(
+                    train,
+                    periods=len(test),
+                    exog=exog_train,
+                    exog_future=exog_test,
+                    auto_tune=bool(kalman_cfg.get("auto_tune", False)),
+                )
+            member_preds["kalman"] = post_process(kalman_out).reindex(test_index)
 
         # 融合：以滚动窗口内的 MAPE 倒数中间权重（与历史版本保持可对比性）
-        mid = _map_weights({"hw": hw_pred, "sarima": sarima_pred}, test)
-        if use_intervention:
-            # 干预引擎: 融合 = HW 与已建模干预的 SARIMA 直接加权（避免重复建模）
-            ens_pred = (hw_pred.astype(float) * mid.get("hw", 0.5)) + (sarima_pred.astype(float) * mid.get("sarima", 0.5))
-            ens_pred = ens_pred.clip(lower=0.0)
-        else:
+        mid = _map_weights(member_preds, test)
+        if "kalman" not in members and len(member_preds) == 2 and not use_intervention:
+            # 原 legacy 两成员路径：保持 ensemble_forecast 重拟合 + 后处理行为
             ens_out, _ = ensemble_forecast(
                 train,
                 weights=mid,
@@ -247,8 +290,13 @@ def rolling_backtest(
                 exog_future=exog_test,
             )
             ens_pred = post_process(ens_out).reindex(test_index)
+        else:
+            # 干预引擎或含卡尔曼成员：成员预测已处理后直接加权（避免重复建模）
+            ens_pred = sum(member_preds[k].astype(float) * mid.get(k, 0.0) for k in member_preds)
+            ens_pred = ens_pred.clip(lower=0.0)
 
-        for key, pred in (("hw", hw_pred), ("sarima", sarima_pred), ("ensemble", ens_pred)):
+        for key in keys:
+            pred = ens_pred if key == "ensemble" else member_preds[key]
             m = _metrics(test.values, pred.values)
             results[key].append(m)
             errors[key].append(np.asarray(pred.values - test.values, dtype=float))
@@ -411,31 +459,32 @@ def _recommend_model(summary: Dict[str, Any], errors: Optional[Dict[str, Any]] =
     """依据回测结果给出推荐：最优单模型 + 融合权重（BMA 优先）。"""
     from capm.bayesian import bma_weights
 
+    member_keys = [k for k in ("hw", "sarima", "kalman") if k in summary or (errors and k in errors)]
+
     # 1) 融合权重：BMA（有残差时），否则 MAPE 倒数
     weights = None
     weight_method = "均分"
     if errors:
-        err_sub = {k: v for k, v in errors.items() if k in ("hw", "sarima") and len(v) > 0}
-        if len(err_sub) == 2:
+        err_sub = {k: v for k, v in errors.items() if k in member_keys and len(v) > 0}
+        if len(err_sub) >= 2:
             weights = bma_weights(err_sub)
             weight_method = "BMA(贝叶斯模型平均)"
 
     if weights is None:
-        mape_hw = float(summary.get("hw", {}).get("mape", float("nan")))
-        mape_sarima = float(summary.get("sarima", {}).get("mape", float("nan")))
         scores = {}
-        for k, m in [("hw", mape_hw), ("sarima", mape_sarima)]:
-            scores[k] = 1.0 / m if (m == m and m > 0) else 0.0
+        for k in member_keys:
+            mape_k = float(summary.get(k, {}).get("mape", float("nan")))
+            scores[k] = 1.0 / mape_k if (mape_k == mape_k and mape_k > 0) else 0.0
         total = sum(scores.values())
         if total > 0:
             weights = {k: float(v / total) for k, v in scores.items()}
             weight_method = "MAPE倒数"
         else:
-            weights = {"hw": 0.5, "sarima": 0.5}
+            weights = {k: 1.0 / max(len(member_keys), 1) for k in member_keys}
 
     # 2) 最优单模型（按 MAPE 排序）
     best_model = min(
-        [k for k in ("hw", "sarima", "ensemble") if k in summary],
+        [k for k in tuple(member_keys) + ("ensemble",) if k in summary],
         key=lambda k: float(summary[k].get("mape", float("inf")) or float("inf")),
         default="ensemble",
     )
@@ -443,20 +492,24 @@ def _recommend_model(summary: Dict[str, Any], errors: Optional[Dict[str, Any]] =
 
 
 def recommend_weights_from_backtest(backtest_result: Dict[str, Any]) -> Dict[str, float]:
-    """兼容接口：返回 {"hw": ..., "sarima": ...} 融合权重（BMA 优先）。"""
+    """兼容接口：返回 {"hw": ..., "sarima": ..., "kalman": ...} 融合权重（BMA 优先）。
+
+    旧版两成员回测结果不含 kalman 键，返回值也不含；调用方按缺省 0 处理。
+    """
     rec = backtest_result.get("recommendation") or {}
     weights = rec.get("weights")
     if weights and isinstance(weights, dict):
         return dict(weights)
     summary = backtest_result.get("summary", {})
-    mape_hw = float(summary.get("hw", {}).get("mape", float("nan")))
-    mape_sarima = float(summary.get("sarima", {}).get("mape", float("nan")))
     scores = {}
-    for k, m in [("hw", mape_hw), ("sarima", mape_sarima)]:
-        if m != m or m <= 0:
+    for k in ("hw", "sarima", "kalman"):
+        if k not in summary:
+            continue
+        mape_k = float(summary[k].get("mape", float("nan")))
+        if mape_k != mape_k or mape_k <= 0:
             scores[k] = 0.0
         else:
-            scores[k] = 1.0 / m
+            scores[k] = 1.0 / mape_k
     total = sum(scores.values())
     if total <= 0:
         return {"hw": 0.5, "sarima": 0.5}

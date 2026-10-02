@@ -51,7 +51,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\plane.ico'],
+    icon=['assets\\airCAPM.ico'],
 )
 coll = COLLECT(
     exe,

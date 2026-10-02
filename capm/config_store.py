@@ -2,6 +2,7 @@ import os
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from capm.app_paths import AppPaths
@@ -64,7 +65,7 @@ def default_config() -> Dict[str, Any]:
                 "model": {
                     "weight_mode": "auto",
                     "engine": "intervention",
-                    "weights": {"hw": 0.5, "sarima": 0.5},
+                    "weights": {"hw": 0.4, "sarima": 0.4, "kalman": 0.2},
                     "sarima": {
                         "auto_tune": False,
                         "order": [1, 1, 1],
@@ -74,6 +75,9 @@ def default_config() -> Dict[str, Any]:
                         "trend": "add",
                         "seasonal": "add",
                         "seasonal_periods": 12,
+                        "auto_tune": False,
+                    },
+                    "kalman": {
                         "auto_tune": False,
                     },
                 },
@@ -109,8 +113,7 @@ class ConfigStore:
 
         if not os.path.exists(path):
             try:
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                Path(path).write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
             self.cache = cfg
@@ -132,8 +135,7 @@ class ConfigStore:
         try:
             cfg = dict(cfg)
             cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            Path(path).write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
             self.cache = cfg
             return True, path
         except Exception as e:

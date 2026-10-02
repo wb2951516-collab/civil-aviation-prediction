@@ -20,7 +20,7 @@ Write-Host "Building executable with PyInstaller..." -ForegroundColor Cyan
 
 $ExePath = Join-Path $ProjectRoot "dist\CAPM\CAPM.exe"
 if (-not (Test-Path $ExePath)) {
-    pyinstaller --name=CAPM --windowed --icon="assets\plane.ico" --noconfirm --clean --add-data="assets;assets" --collect-all capm --collect-all pandas --collect-all scipy --collect-all statsmodels --collect-all numpy CAPM.py
+    pyinstaller --name=CAPM --windowed --icon="assets\airCAPM.ico" --noconfirm --clean --add-data="assets;assets" --collect-all capm --collect-all pandas --collect-all scipy --collect-all statsmodels --collect-all numpy CAPM.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed: $LASTEXITCODE" }
 }
 if (-not (Test-Path $ExePath)) { throw "Missing packaged exe: $ExePath" }

@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -181,10 +183,9 @@ class ExternalDataManager:
         try:
             os.makedirs(self.cache_dir, exist_ok=True)
             meta = {"refreshed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "sources": self._source_flags}
-            with open(self._cache_file("meta.json"), "w", encoding="utf-8") as f:
-                import json
-
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+            Path(self._cache_file("meta.json")).write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             for name in ("gdp", "ask"):
                 df = self._cache.get(name) if self._cache else None
                 if df is not None and len(df):

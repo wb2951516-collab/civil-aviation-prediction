@@ -277,6 +277,154 @@ def sarimax_intervention_forecast(
         return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "fit_failed"})
 
 
+def kalman_forecast(
+    ts,
+    periods: int = 12,
+    level: str = "local linear trend",
+    seasonal: bool = True,
+    seasonal_periods: int = 12,
+    exog: Any = None,
+    exog_future: Any = None,
+    auto_tune: bool = False,
+) -> ForecastOutput:
+    """卡尔曼滤波状态空间模型（UC：局部线性趋势 + 随机季节）。
+
+    statsmodels UnobservedComponents 以卡尔曼滤波进行似然估计与状态递推，
+    与 SARIMA（同为状态空间但 ARIMA 结构约束）形成互补的模型视角：
+    趋势与季节均作为隐状态随机演化，而非固定差分结构。
+
+    auto_tune=True 时在 {局部线性趋势, 随机趋势} × {随机季节, 确定季节}
+    中按 AIC 择优。拟合失败按"随机趋势 → 简单季节性"逐级回退。
+    """
+    import warnings
+
+    import numpy as np
+    import pandas as pd
+    from statsmodels.tsa.statespace.structural import UnobservedComponents
+
+    ts = ts.dropna()
+    min_len = max(2 * int(seasonal_periods) if seasonal else 12, 24)
+    if len(ts) < min_len:
+        return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "too_short"})
+
+    candidates = [(level, seasonal)]
+    if auto_tune:
+        candidates = [
+            ("local linear trend", True),
+            ("local linear trend", False),
+            ("random trend", True),
+        ]
+
+    def _fit(lvl, seas):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = UnobservedComponents(
+                ts.astype(float),
+                level=lvl,
+                seasonal=int(seasonal_periods) if seas else None,
+                stochastic_seasonal=True if seas else False,
+                exog=exog,
+            )
+            return model.fit(disp=False, maxiter=200)
+
+    best_res = None
+    best_aic = float("inf")
+    best_meta: Dict[str, Any] = {}
+    for lvl, seas in candidates:
+        try:
+            res = _fit(lvl, seas)
+            aic = float(getattr(res, "aic", float("inf")))
+            if aic == aic and aic < best_aic:
+                best_aic = aic
+                best_res = res
+                best_meta = {"method": "kalman_uc", "level": lvl, "seasonal": seas, "aic": aic, "with_exog": exog is not None}
+        except Exception:
+            continue
+
+    if best_res is None:
+        # 降级：随机趋势（无季节状态）再试一次
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = UnobservedComponents(ts.astype(float), level="random trend", exog=exog)
+                best_res = model.fit(disp=False, maxiter=200)
+                best_meta = {"method": "kalman_uc", "level": "random trend", "seasonal": False, "aic": float(getattr(best_res, "aic", float("inf"))), "with_exog": exog is not None}
+        except Exception:
+            return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "fit_failed"})
+
+    idx = _future_month_index(ts, periods)
+    try:
+        pred = best_res.forecast(steps=int(periods), exog=exog_future)
+    except Exception:
+        return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "forecast_failed"})
+    pred = pd.Series(np.asarray(pred, dtype=float), index=idx).clip(lower=0.0)
+    if not np.isfinite(pred.values).all():
+        return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "nonfinite_forecast"})
+
+    # 95% 预测置信区间（供图表置信带展示）
+    try:
+        pred_res = best_res.get_prediction(
+            start=len(ts),
+            end=len(ts) + int(periods) - 1,
+            exog=exog_future,
+            dynamic=False,
+        )
+        ci = pred_res.conf_int(alpha=0.05)
+        ci_values = np.asarray(ci, dtype=float)
+        conf = pd.DataFrame(ci_values, index=idx, columns=["lower", "upper"]).clip(lower=0.0)
+        conf = conf[conf["lower"].notna() & conf["upper"].notna()]
+        if len(conf):
+            best_meta["conf_int"] = conf
+    except Exception:
+        pass
+
+    return ForecastOutput(pred, best_meta)
+
+
+def kalman_intervention_forecast(
+    ts,
+    periods: int = 12,
+    spring_festival_dates: Optional[Dict[str, Any]] = None,
+    holiday_cfg: Optional[Dict[str, Any]] = None,
+    include_covid: bool = True,
+    exog_data: Any = None,
+    auto_tune: bool = False,
+) -> ForecastOutput:
+    """卡尔曼 UC + 干预变量(节假日+COVID) exog, 与 sarimax_intervention_forecast 对齐。
+
+    节假日/COVID 干预变量与 ask/gdp 外生变量同样进入 UC 模型的回归项，
+    保证三成员（HW / SARIMAX 干预 / 卡尔曼 UC 干预）在干预引擎下可比。
+    """
+    import pandas as pd
+
+    from capm.holiday import build_intervention_exog
+
+    ts = ts.dropna()
+    if len(ts) < 24:
+        return ForecastOutput(simple_seasonal_forecast(ts, periods=periods), {"method": "fallback", "reason": "too_short_for_intervention"})
+
+    spring_festival_dates = spring_festival_dates or {}
+    future_idx = _future_month_index(ts, periods)
+    full_index = ts.index.append(future_idx)
+    exog_all = build_intervention_exog(full_index, spring_festival_dates, holiday_cfg, include_covid, exog_data=exog_data)
+    train_exog = exog_all.iloc[: len(ts)]
+    future_exog = exog_all.iloc[len(ts) : len(ts) + periods]
+
+    out = kalman_forecast(
+        ts,
+        periods=periods,
+        exog=train_exog,
+        exog_future=future_exog,
+        auto_tune=auto_tune,
+    )
+    if out.meta.get("method") == "kalman_uc":
+        meta = dict(out.meta)
+        meta["include_covid"] = include_covid
+        meta["exog_cols"] = list(exog_all.columns)
+        out = ForecastOutput(out.forecast, meta)
+    return out
+
+
 def ensemble_forecast(
     ts,
     weights: Dict[str, float],
@@ -287,13 +435,16 @@ def ensemble_forecast(
     hw_params: Optional[Dict[str, Any]] = None,
     exog: Any = None,
     exog_future: Any = None,
+    kalman_params: Optional[Dict[str, Any]] = None,
 ) -> Tuple[EnsembleOutput, Dict[str, ForecastOutput]]:
-    """精选算法集成融合：Holt-Winters + SARIMA（可选外生变量）。
+    """精选算法集成融合：Holt-Winters + SARIMA（可选外生变量）+ 卡尔曼 UC（可选）。
 
-    权重字典兼容旧配置（linear 键被忽略并重新归一化）。
+    权重字典兼容旧配置：linear 键被忽略并重新归一化；"kalman" 键缺省或为 0 时
+    保持原两成员行为，不引入卡尔曼计算开销。
     """
     sarima_params = sarima_params or {}
     hw_params = hw_params or {}
+    kalman_params = kalman_params or {}
 
     hw = holt_winters_forecast(
         ts,
@@ -315,18 +466,39 @@ def ensemble_forecast(
 
     w_hw = float(weights.get("hw", 0.0))
     w_s = float(weights.get("sarima", 0.0))
-    total = w_hw + w_s
+    w_k = float(weights.get("kalman", 0.0))
+
+    components: Dict[str, ForecastOutput] = {"Holt-Winters": hw, "SARIMA": sarima}
+    kalman = None
+    if w_k > 0:
+        kalman = kalman_forecast(
+            ts,
+            periods=periods,
+            exog=exog,
+            exog_future=exog_future,
+            auto_tune=bool(kalman_params.get("auto_tune", False)),
+        )
+        components["卡尔曼UC"] = kalman
+
+    total = w_hw + w_s + w_k
     if total <= 0:
         w_hw = w_s = 0.5
+        w_k = 0.0
         total = 1.0
     w_hw /= total
     w_s /= total
+    w_k /= total
 
     idx = hw.forecast.index
     ens = (hw.forecast.reindex(idx).astype(float) * w_hw) + (sarima.forecast.reindex(idx).astype(float) * w_s)
+    if kalman is not None and w_k > 0:
+        ens = ens + (kalman.forecast.reindex(idx).astype(float) * w_k)
     ens = ens.clip(lower=0.0)
 
-    out = EnsembleOutput(ens, {"hw": w_hw, "sarima": w_s}, {"method": "ensemble", "with_exog": exog is not None})
-    components = {"Holt-Winters": hw, "SARIMA": sarima}
+    out = EnsembleOutput(
+        ens,
+        {"hw": w_hw, "sarima": w_s, "kalman": w_k if kalman is not None else 0.0},
+        {"method": "ensemble", "with_exog": exog is not None, "members": [k for k, v in (("hw", w_hw), ("sarima", w_s), ("kalman", w_k)) if v > 0]},
+    )
     return out, components
 

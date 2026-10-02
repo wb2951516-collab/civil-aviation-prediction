@@ -5,8 +5,16 @@ meta_path="$project_root/packaging/app.json"
 version="$(python3 -c "import json;print(json.load(open(r'$meta_path','r',encoding='utf-8'))['version'])")"
 product_name="$(python3 -c "import json;print(json.load(open(r'$meta_path','r',encoding='utf-8'))['product_name'])")"
 bundle_id="$(python3 -c "import json;print(json.load(open(r'$meta_path','r',encoding='utf-8'))['bundle_id'])")"
+icon_macos="$(python3 -c "import json;print(json.load(open(r'$meta_path','r',encoding='utf-8')).get('icon_macos_icns',''))")"
 
 cd "$project_root"
+
+icon_args=()
+if [ -n "$icon_macos" ] && [ -f "$project_root/$icon_macos" ]; then
+  icon_args+=(--macos-app-icon="$project_root/$icon_macos")
+else
+  echo "WARN: macOS icon not found ($icon_macos), building without app icon" >&2
+fi
 
 python3 -m nuitka \
   --mode=standalone \
@@ -15,6 +23,7 @@ python3 -m nuitka \
   --macos-app-version="$version" \
   --macos-app-protected-resource=packaging/app.json \
   --macos-app-company-name="$product_name" \
+  "${icon_args[@]}" \
   --enable-plugin=tk-inter \
   --enable-plugin=matplotlib \
   --include-package=capm \

@@ -56,3 +56,10 @@ logs/
 
 # ===== 评估输出 =====
 eval_*.txt
+out/
+
+# ===== 本地工具目录与备份 =====
+.mimosa/
+.v2c/
+.video_agent/
+capm_backup_before_rewrite.bundle

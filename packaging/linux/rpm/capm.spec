@@ -1,5 +1,5 @@
 Name: capm
-Version: 1.3.2
+Version: 1.4.0
 Release: 1%{?dist}
 Summary: CAPM 民航旅客运输量预测系统
 License: GPLv3
@@ -20,14 +20,17 @@ rm -rf %{buildroot}
 mkdir -p %{buildroot}/opt/capm
 mkdir -p %{buildroot}/usr/bin
 mkdir -p %{buildroot}/usr/share/applications
+mkdir -p %{buildroot}/usr/share/icons/hicolor/256x256/apps
 
 install -m 0755 %{_sourcedir}/capm %{buildroot}/opt/capm/capm
 install -m 0755 %{_sourcedir}/capm %{buildroot}/usr/bin/capm
 install -m 0644 %{_sourcedir}/capm.desktop %{buildroot}/usr/share/applications/capm.desktop
+install -m 0644 %{_sourcedir}/airCAPM_256.png %{buildroot}/usr/share/icons/hicolor/256x256/apps/capm.png
 
 %files
 /opt/capm/capm
 /usr/bin/capm
 /usr/share/applications/capm.desktop
+/usr/share/icons/hicolor/256x256/apps/capm.png
 
 %changelog

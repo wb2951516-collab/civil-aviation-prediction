@@ -3,11 +3,11 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](packaging/README.md)
-[![Release](https://img.shields.io/badge/Release-v1.3.2-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
+[![Release](https://img.shields.io/badge/Release-v1.4.0-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
 
 **[English](README_EN.md)** | 中文
 
-面向民航运输规划场景的月度旅客运输量预测系统：精选统计模型 + 干预引擎 + 贝叶斯模型平均（BMA）自动融合，内置量化回测与情景分析，提供开箱即用的桌面 GUI。
+面向民航运输规划场景的月度旅客运输量预测系统：精选统计模型 + 干预引擎 + 卡尔曼滤波状态空间 + 贝叶斯模型平均（BMA）自动融合，内置量化回测与情景分析，提供开箱即用的桌面 GUI。
 
 https://github.com/user-attachments/assets/a080922d-25e9-4a22-8c77-83fe90cdc896
 
@@ -21,9 +21,9 @@ https://github.com/user-attachments/assets/a080922d-25e9-4a22-8c77-83fe90cdc896
 
 | 模块 | 作用 |
 |------|------|
-| 精选模型集合 | Holt-Winters、SARIMA/SARIMAX（经实证淘汰线性回归等弱势模型） |
+| 精选模型集合 | Holt-Winters、SARIMA/SARIMAX、卡尔曼滤波 UC（经实证淘汰线性回归等弱势模型） |
 | 干预引擎 | 节假日（含农历）与冲击事件作为 SARIMAX 外生变量建模，替代后处理修正 |
-| BMA 融合 | 贝叶斯模型平均按回测似然自动分配权重，无需人工调参 |
+| BMA 融合 | 贝叶斯模型平均按回测似然自动分配三成员权重，无需人工调参 |
 | 增长合理性校准 | 对异常增长率分级告警而非强制覆盖，避免二次失真 |
 | 量化回测 | 滚动回测 / 样本外测试，MAE、RMSE、MAPE、MDA、Theil U、Ljung-Box 残差检验 |
 | 马尔可夫情景分析 | 增长/平稳/回落状态转移，输出景气情景参考（不干预主预测） |
@@ -38,13 +38,21 @@ https://github.com/user-attachments/assets/a080922d-25e9-4a22-8c77-83fe90cdc896
 | 冲击期（2020–2022）融合 MAPE | 173.32% | **9.64%** |
 | 样本外 holdout 融合 MAPE | 38.24% | **4.39%** |
 
-> 算法决策的完整实证依据（模型淘汰理由、马尔可夫/贝叶斯方案评估、多窗口稳健性验证）见 [docs/ALGORITHM_REDESIGN.md](docs/ALGORITHM_REDESIGN.md)。
+> 算法决策的完整实证依据（模型淘汰理由、马尔可夫/贝叶斯方案评估、多窗口稳健性验证）见 [docs/ALGORITHM_REDESIGN.md](docs/ALGORITHM_REDESIGN.md)；V1.4 卡尔曼滤波融入的严格门槛评估见 [docs/KALMAN_GATE_V1.4.md](docs/KALMAN_GATE_V1.4.md)。
+
+### V1.4 卡尔曼滤波融入实证（CAAC 官方月度客座率，2006.02–2026.08 共 247 个月，滚动回测）
+
+| 指标 | 两成员集成（V1.3） | 三成员集成（V1.4，+卡尔曼） |
+|------|------------------|---------------------------|
+| 融合 MAPE | 4.02% | **3.61%（相对改善 10.3%）** |
+| 融合 RMSE | 3.48 | **3.17** |
+| Theil U | 1.15 | **0.99（优于朴素基准）** |
 
 ## 二、安装
 
 ### 方式一：Windows 安装包（推荐）
 
-从 [Releases](https://github.com/wb2951516-collab/civil-aviation-prediction/releases) 下载 `CAPM-Setup-1.3.2.exe`，双击安装即可（简体中文安装向导，自带运行环境，无需配置 Python）。
+从 [Releases](https://github.com/wb2951516-collab/civil-aviation-prediction/releases) 下载 `CAPM-Setup-1.4.0.exe`，双击安装即可（简体中文安装向导，自带运行环境，无需配置 Python）。
 
 ### 方式二：源码运行
 
@@ -70,7 +78,7 @@ python CAPM.py
 ```
 CAPM.py                  # GUI 主程序（入口）
 capm/
-  ├── models.py          # 模型层：HW / SARIMA / 融合
+  ├── models.py          # 模型层：HW / SARIMA / 卡尔曼UC / 融合
   ├── backtest.py        # 量化回测引擎（滚动 / holdout）
   ├── bayesian.py       # BMA 权重与贝叶斯回归
   ├── markov.py         # 马尔可夫状态转移情景分析
@@ -95,7 +103,7 @@ packaging/               # Windows/macOS/Linux 安装包工程
 
 ```powershell
 pyinstaller CAPM.spec                        # PyInstaller 打包
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=1.3.2 packaging\windows\capm.iss
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=1.4.0 packaging\windows\capm.iss
 ```
 
 ## 七、许可证

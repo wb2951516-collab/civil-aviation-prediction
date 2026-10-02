@@ -1,7 +1,7 @@
 #define AppName "CAPM"
 #define AppDisplayName "民航旅客运输量预测系统"
 #ifndef AppVersion
-  #define AppVersion "1.3.2"
+  #define AppVersion "1.4.0"
 #endif
 #define AppPublisher "SuperM"
 #define AppExeName "CAPM.exe"
@@ -23,7 +23,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 WizardStyle=modern
-SetupIconFile=..\..\assets\plane.ico
+SetupIconFile=..\..\assets\airCAPM.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 
 [Languages]
