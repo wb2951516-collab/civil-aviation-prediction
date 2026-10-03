@@ -21,6 +21,7 @@ mkdir -p "$topdir/BUILD" "$topdir/RPMS" "$topdir/SOURCES" "$topdir/SPECS" "$topd
 
 cp "$project_root/dist_linux/capm" "$topdir/SOURCES/capm"
 cp "$project_root/packaging/linux/capm.desktop" "$topdir/SOURCES/capm.desktop"
+cp "$project_root/assets/airCAPM_256.png" "$topdir/SOURCES/airCAPM_256.png"
 cp "$project_root/packaging/linux/rpm/capm.spec" "$topdir/SPECS/capm.spec"
 sed -i "s/^Version:.*/Version: ${version}/" "$topdir/SPECS/capm.spec"
 
