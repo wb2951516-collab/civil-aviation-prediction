@@ -51,3 +51,25 @@ Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; F
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{userappdata}\CAPM"; Tasks: purgeuserdata
+
+[Code]
+const
+  SHCNE_ASSOCCHANGED = $04000000;
+  SHCNF_IDLIST = $0000;
+
+procedure SHChangeNotify(wEventId, uFlags: Cardinal; dwItem1, dwItem2: Cardinal);
+  external 'SHChangeNotify@shell32.dll stdcall';
+
+// 升级安装后路径不变，Windows 图标缓存会继续显示旧版图标；
+// 安装/卸载完成后通知 Shell 刷新，桌面/开始菜单/任务栏立即换新图标
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, 0, 0);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, 0, 0);
+end;

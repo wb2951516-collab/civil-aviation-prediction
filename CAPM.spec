@@ -41,6 +41,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='CAPM',
+    version='packaging\\windows\\version_info.py',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

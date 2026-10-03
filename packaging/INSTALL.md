@@ -76,6 +76,17 @@ sudo dnf install ./capm-<version>-1.x86_64.rpm
    - 安全软件拦截：某些杀毒软件可能误杀未签名的 EXE。请添加信任。
    - 缺少依赖：确认安装包完整性（Standalone 模式下应包含 `CAPM.dist` 目录）。
 
+5. **升级安装后桌面/任务栏图标仍显示旧版**
+   - 原因：Windows 图标缓存按文件路径索引，覆盖安装路径不变时 Explorer 会继续显示旧图标（程序本体已是新版）。
+   - 处理：在 CMD 中执行以下命令重建图标缓存（或重启电脑）：
+     ```bat
+     taskkill /f /im explorer.exe
+     del /a /q "%LOCALAPPDATA%\IconCache.db"
+     del /a /q "%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache_*.db"
+     start explorer.exe
+     ```
+   - 核对已安装版本：右键 `CAPM.exe` → 属性 → 详细信息 → 查看"产品版本"（1.4.0 起提供）；或在应用内查看副标题版本号。
+
 ## 用户数据
 
 默认不删除用户数据（便于升级保留配置）。
