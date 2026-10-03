@@ -136,7 +136,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: installer-linux
-          path: dist_installers/linux/*
+          path: |
+            dist_installers/linux/*.deb
+            dist_installers/linux/*.rpm
           if-no-files-found: error
 
   release:
@@ -161,9 +163,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "CAPM $RELEASE_TAG" \
-            --generate-notes \
-            --verify-tag \
-            artifacts/*
+          set -x
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists, uploading assets only"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "CAPM $RELEASE_TAG" \
+              --generate-notes \
+              --verify-tag
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber artifacts/*
