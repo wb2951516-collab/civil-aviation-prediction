@@ -6,7 +6,11 @@ version="$(python3 -c "import json;print(json.load(open(r'$meta_path','r',encodi
 
 cd "$project_root"
 
-bash packaging/linux/build_binary.sh
+if [ "${REUSE_BINARY:-0}" = "1" ] && [ -x "$project_root/dist_linux/capm" ]; then
+  echo "Reusing existing dist_linux/capm (REUSE_BINARY=1)"
+else
+  bash packaging/linux/build_binary.sh
+fi
 
 out_dir="$project_root/dist_installers/linux"
 mkdir -p "$out_dir"

@@ -35,6 +35,7 @@ CAPM-Setup-1.0.0.exe /VERYSILENT /NORESTART
 
 安全与签名：
 - 若用于对外发布，需要对 `.app` 进行代码签名并公证（notarization），否则可能被 Gatekeeper 拦截。
+- CI 构建的 DMG 未签名：首次打开若被拦截，请**右键 → 打开**（不要直接双击），或执行 `xattr -cr /Applications/CAPM.app`。
 
 ## Linux（DEB/RPM）
 

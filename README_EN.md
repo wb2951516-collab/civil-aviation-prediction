@@ -3,6 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
 [![Release](https://img.shields.io/badge/Release-v1.4.0-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
+[![Build & Release](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml/badge.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml)
 
 **English** | [中文](README.md)
 
@@ -39,7 +40,11 @@ https://github.com/user-attachments/assets/a080922d-25e9-4a22-8c77-83fe90cdc896
 
 ### Install
 
-- **Windows**: download `CAPM-Setup-1.4.0.exe` from [Releases](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
+Installers for all three platforms are built automatically by [GitHub Actions](.github/workflows/release.yml) on every `v*` tag and published to [Releases](https://github.com/wb2951516-collab/civil-aviation-prediction/releases):
+
+- **Windows x64**: `CAPM-Setup-<version>.exe` (bilingual installer, bundled runtime, no Python needed)
+- **macOS** (separate Intel / Apple Silicon builds): `CAPM-<version>-macos-<arch>.dmg` — unsigned, first launch: right-click → Open, or `xattr -cr /Applications/CAPM.app`
+- **Linux x86_64**: `capm_<version>_amd64.deb` (Debian/Ubuntu) or `capm-<version>-*.rpm` (Fedora/RHEL)
 - **From source**: `pip install -r requirements.txt && python CAPM.py` (Windows / macOS / Linux)
 
 ### License

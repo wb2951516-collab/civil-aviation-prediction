@@ -1,0 +1,168 @@
+name: Release Installers
+
+# 触发方式：
+#   1) 推送 v* 标签 → 构建三平台安装包并自动创建 GitHub Release
+#   2) 手动 workflow_dispatch → 可传已存在的 tag 名发布，留空仅构建产物
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '为已存在的 tag 构建并发布（如 v1.4.0），留空仅构建'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+
+jobs:
+  windows:
+    name: Windows installer (exe)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Read version from app.json
+        shell: pwsh
+        run: |
+          $v = (Get-Content -Raw packaging/app.json | ConvertFrom-Json).version
+          "CAPM_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build executable (PyInstaller + spec)
+        run: pyinstaller CAPM.spec --noconfirm --clean
+
+      - name: Download VC++ redistributable
+        shell: pwsh
+        run: ./packaging/windows/get_vcredist.ps1
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer (Inno Setup)
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:CAPM_VERSION" "packaging\windows\capm.iss"'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows
+          path: dist_installers/windows/CAPM-Setup-*.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS dmg (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-13, arch: x86_64 }   # Intel
+          - { os: macos-14, arch: arm64 }    # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build .app and DMG (PyInstaller)
+        run: bash packaging/macos/build_app_pyinstaller.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-macos-${{ matrix.arch }}
+          path: dist_installers/macos/*.dmg
+          if-no-files-found: error
+
+  linux:
+    name: Linux deb/rpm
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+
+      - name: Install system packages (tcl/tk for tkinter, rpm for rpmbuild)
+        run: sudo apt-get update && sudo apt-get install -y rpm tcl tk python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build standalone binary (PyInstaller)
+        run: bash packaging/linux/build_binary_pyinstaller.sh
+
+      - name: Build DEB
+        run: REUSE_BINARY=1 bash packaging/linux/build_deb.sh
+
+      - name: Build RPM
+        run: REUSE_BINARY=1 bash packaging/linux/build_rpm.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-linux
+          path: dist_installers/linux/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: ${{ github.event_name == 'push' || inputs.tag != '' }}
+    needs: [windows, macos, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List built installers
+        run: find artifacts -type f
+
+      - name: Create GitHub Release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "CAPM $RELEASE_TAG" \
+            --generate-notes \
+            --verify-tag \
+            artifacts/*

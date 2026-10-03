@@ -4,6 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](packaging/README.md)
 [![Release](https://img.shields.io/badge/Release-v1.4.0-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
+[![Build & Release](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml/badge.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml)
 
 **[English](README_EN.md)** | 中文
 
@@ -50,9 +51,13 @@ https://github.com/user-attachments/assets/a080922d-25e9-4a22-8c77-83fe90cdc896
 
 ## 二、安装
 
-### 方式一：Windows 安装包（推荐）
+### 方式一：安装包（Windows / macOS / Linux，CI 自动构建）
 
-从 [Releases](https://github.com/wb2951516-collab/civil-aviation-prediction/releases) 下载 `CAPM-Setup-1.4.0.exe`，双击安装即可（简体中文安装向导，自带运行环境，无需配置 Python）。
+推送 `v*` 标签后，[GitHub Actions](.github/workflows/release.yml) 自动构建三平台安装包并发布到 [Releases](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)，按系统下载：
+
+- **Windows x64**：`CAPM-Setup-<版本>.exe`，双击安装（简体中文向导，自带运行环境，无需配置 Python）
+- **macOS**（Intel 与 Apple Silicon 分包）：`CAPM-<版本>-macos-<arch>.dmg`，拖入 `Applications`；产物未做签名公证，首次打开需**右键 → 打开**，或执行 `xattr -cr /Applications/CAPM.app`
+- **Linux x86_64**：`capm_<版本>_amd64.deb`（Debian/Ubuntu）或 `capm-<版本>-*.rpm`（Fedora/RHEL）
 
 ### 方式二：源码运行
 
@@ -99,7 +104,7 @@ packaging/               # Windows/macOS/Linux 安装包工程
 
 ## 六、从源码构建安装包
 
-详见 [packaging/README.md](packaging/README.md)。Windows 构建流程：
+详见 [packaging/README.md](packaging/README.md)。**推送 `v*` 标签即可自动构建三平台安装包并发布 Release**（GitHub Actions）；本机构建示例（Windows）：
 
 ```powershell
 pyinstaller CAPM.spec                        # PyInstaller 打包
