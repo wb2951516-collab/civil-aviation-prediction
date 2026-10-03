@@ -56,7 +56,7 @@ https://github.com/user-attachments/assets/a080922d-25e9-4a22-8c77-83fe90cdc896
 推送 `v*` 标签后，[GitHub Actions](.github/workflows/release.yml) 自动构建三平台安装包并发布到 [Releases](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)，按系统下载：
 
 - **Windows x64**：`CAPM-Setup-<版本>.exe`，双击安装（简体中文向导，自带运行环境，无需配置 Python）
-- **macOS**（Intel 与 Apple Silicon 分包）：`CAPM-<版本>-macos-<arch>.dmg`，拖入 `Applications`；产物未做签名公证，首次打开需**右键 → 打开**，或执行 `xattr -cr /Applications/CAPM.app`
+- **macOS（Apple Silicon）**：`CAPM-<版本>-macos-arm64.dmg`，拖入 `Applications`；产物未做签名公证，首次打开需**右键 → 打开**，或执行 `xattr -cr /Applications/CAPM.app`（GitHub 已退役 Intel 云构建机，Intel Mac 请用源码方式运行）
 - **Linux x86_64**：`capm_<版本>_amd64.deb`（Debian/Ubuntu）或 `capm-<版本>-*.rpm`（Fedora/RHEL）
 
 ### 方式二：源码运行

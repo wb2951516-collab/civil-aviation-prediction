@@ -43,7 +43,7 @@ https://github.com/user-attachments/assets/a080922d-25e9-4a22-8c77-83fe90cdc896
 Installers for all three platforms are built automatically by [GitHub Actions](.github/workflows/release.yml) on every `v*` tag and published to [Releases](https://github.com/wb2951516-collab/civil-aviation-prediction/releases):
 
 - **Windows x64**: `CAPM-Setup-<version>.exe` (bilingual installer, bundled runtime, no Python needed)
-- **macOS** (separate Intel / Apple Silicon builds): `CAPM-<version>-macos-<arch>.dmg` — unsigned, first launch: right-click → Open, or `xattr -cr /Applications/CAPM.app`
+- **macOS (Apple Silicon)**: `CAPM-<version>-macos-arm64.dmg` — unsigned, first launch: right-click → Open, or `xattr -cr /Applications/CAPM.app` (GitHub retired Intel cloud runners; Intel Macs: run from source)
 - **Linux x86_64**: `capm_<version>_amd64.deb` (Debian/Ubuntu) or `capm-<version>-*.rpm` (Fedora/RHEL)
 - **From source**: `pip install -r requirements.txt && python CAPM.py` (Windows / macOS / Linux)
 

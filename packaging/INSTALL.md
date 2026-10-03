@@ -5,7 +5,7 @@
 ## 系统要求
 
 - Windows 10/11 x64
-- macOS（需分别提供 Intel x86_64 与 Apple Silicon arm64 构建产物）
+- macOS（Apple Silicon arm64；Intel Mac 请通过源码方式运行）
 - Linux x86_64（Debian/Ubuntu：DEB；Fedora/RHEL：RPM）
 
 ## Windows（EXE 安装程序）

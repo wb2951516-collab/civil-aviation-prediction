@@ -76,8 +76,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # GitHub 已退役 Intel(macos-13) 云构建机，macOS 包仅提供 Apple Silicon；
+        # Intel Mac 用户请使用源码方式运行（见 README 安装说明）
         include:
-          - { os: macos-13, arch: x86_64 }   # Intel
           - { os: macos-14, arch: arm64 }    # Apple Silicon
     steps:
       - uses: actions/checkout@v4

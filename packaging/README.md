@@ -11,7 +11,7 @@
 
 ## 构建原则
 
-- 64 位优先：Windows x86_64、Linux x86_64、macOS Intel/Apple Silicon 分别构建
+- 64 位优先：Windows x86_64、Linux x86_64、macOS Apple Silicon 分别构建（GitHub 已退役 Intel macOS 云构建机，Intel Mac 用户走源码运行）
 - “独立运行”：安装后不依赖开发环境路径；运行时用户数据目录在用户配置目录（Windows：`%APPDATA%\\CAPM`）
 - 静默安装：Windows 安装程序支持 ` /SILENT` / ` /VERYSILENT`
 
@@ -22,7 +22,7 @@
 | 产物 | 构建链路 | Runner |
 |------|---------|--------|
 | `CAPM-Setup-<ver>.exe` | PyInstaller（`CAPM.spec`）+ Inno Setup | `windows-latest` |
-| `CAPM-<ver>-macos-<arch>.dmg` | `macos/build_app_pyinstaller.sh`（PyInstaller + hdiutil） | `macos-13`(Intel) / `macos-14`(Apple Silicon) |
+| `CAPM-<ver>-macos-arm64.dmg` | `macos/build_app_pyinstaller.sh`（PyInstaller + hdiutil） | `macos-14`(Apple Silicon) |
 | `capm_<ver>_amd64.deb` / `capm-<ver>-*.rpm` | `linux/build_binary_pyinstaller.sh` + `build_deb.sh` / `build_rpm.sh`（`REUSE_BINARY=1` 复用二进制） | `ubuntu-22.04` |
 
 说明：
