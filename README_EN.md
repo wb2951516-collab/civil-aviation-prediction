@@ -1,6 +1,6 @@
 # CAPM — Civil Aviation Passenger Traffic Prediction
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
 [![Release](https://img.shields.io/badge/Release-v1.4.0-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
 [![Build & Release](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml/badge.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml)
@@ -49,4 +49,4 @@ Installers for all three platforms are built automatically by [GitHub Actions](.
 
 ### License
 
-GPL-3.0. See [LICENSE](LICENSE). The full algorithm design rationale is documented in [docs/ALGORITHM_REDESIGN.md](docs/ALGORITHM_REDESIGN.md) (Chinese); the V1.4 Kalman integration acceptance report in [docs/KALMAN_GATE_V1.4.md](docs/KALMAN_GATE_V1.4.md) (Chinese).
+MIT. See [LICENSE](LICENSE). The full algorithm design rationale is documented in [docs/ALGORITHM_REDESIGN.md](docs/ALGORITHM_REDESIGN.md) (Chinese); the V1.4 Kalman integration acceptance report in [docs/KALMAN_GATE_V1.4.md](docs/KALMAN_GATE_V1.4.md) (Chinese).

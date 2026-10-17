@@ -1,6 +1,6 @@
 # CAPM 民航旅客运输量预测系统
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](packaging/README.md)
 [![Release](https://img.shields.io/badge/Release-v1.4.0-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
@@ -113,6 +113,6 @@ pyinstaller CAPM.spec                        # PyInstaller 打包
 
 ## 七、许可证
 
-本项目基于 [GPL-3.0](LICENSE) 许可证开源。
+本项目基于 [MIT](LICENSE) 许可证开源。
 
 版权所有 © 2026 SuperM

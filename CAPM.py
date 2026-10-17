@@ -462,7 +462,7 @@ class FinalForecastApp:
         """显示帮助信息"""
         help_text = (
             "Civil aviation passenger traffic volume prediction model\n"
-            "版权所有人：SuperM（GPL-3.0）\n"
+            "版权所有人：SuperM（MIT License）\n"
             "https://github.com/wb2951516-collab/civil-aviation-prediction"
         )
         messagebox.showinfo("关于系统", help_text)

@@ -20,5 +20,6 @@ setup(
         ],
     },
     author="SuperM",
+    license="MIT",
     description="Civil aviation passenger traffic volume prediction model",
 )
