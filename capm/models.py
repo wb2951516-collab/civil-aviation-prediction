@@ -217,7 +217,11 @@ def sarimax_intervention_forecast(
     import pandas as pd
     from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-    from capm.holiday import build_intervention_exog
+    from capm.holiday import (
+        apply_configured_holiday_effects,
+        build_intervention_exog,
+        zero_intervention_holiday_columns,
+    )
 
     ts = ts.dropna()
     if len(ts) < 24:
@@ -230,7 +234,8 @@ def sarimax_intervention_forecast(
     full_index = ts.index.append(future_idx)
     exog_all = build_intervention_exog(full_index, spring_festival_dates, holiday_cfg, include_covid, exog_data=exog_data)
     train_exog = exog_all.iloc[: len(ts)]
-    future_exog = exog_all.iloc[len(ts): len(ts) + periods]
+    # 预测期清零节假日哑变量, 改用配置的效应系数做乘法修正（否则系数永远无效）
+    future_exog = zero_intervention_holiday_columns(exog_all.iloc[len(ts): len(ts) + periods])
 
     try:
         with warnings.catch_warnings():
@@ -246,6 +251,10 @@ def sarimax_intervention_forecast(
             res = model.fit(disp=False)
             pred = res.forecast(steps=int(periods), exog=future_exog)
             pred = pd.Series(pred.values, index=future_idx).clip(lower=0.0)
+            baseline = pred.copy()
+            # 按配置的效应系数修正预测月份（预测期哑变量已清零, 不会与模型估计双重叠加）
+            pred = apply_configured_holiday_effects(pred, holiday_cfg, spring_festival_dates)
+            factor = (pred / baseline.replace(0, np.nan)).fillna(1.0)
 
             # 95% 置信区间
             try:
@@ -258,6 +267,8 @@ def sarimax_intervention_forecast(
                 ci = pred_res.conf_int(alpha=0.05)
                 ci_values = np.asarray(ci, dtype=float)
                 conf = pd.DataFrame(ci_values, index=future_idx, columns=["lower", "upper"]).clip(lower=0.0)
+                # 区间随均值同比例缩放, 保持相对宽度
+                conf = conf.mul(np.asarray(factor, dtype=float), axis=0)
                 conf = conf[conf["lower"].notna() & conf["upper"].notna()]
             except Exception:
                 conf = None
@@ -397,7 +408,11 @@ def kalman_intervention_forecast(
     """
     import pandas as pd
 
-    from capm.holiday import build_intervention_exog
+    from capm.holiday import (
+        apply_configured_holiday_effects,
+        build_intervention_exog,
+        zero_intervention_holiday_columns,
+    )
 
     ts = ts.dropna()
     if len(ts) < 24:
@@ -408,7 +423,8 @@ def kalman_intervention_forecast(
     full_index = ts.index.append(future_idx)
     exog_all = build_intervention_exog(full_index, spring_festival_dates, holiday_cfg, include_covid, exog_data=exog_data)
     train_exog = exog_all.iloc[: len(ts)]
-    future_exog = exog_all.iloc[len(ts) : len(ts) + periods]
+    # 预测期清零节假日哑变量, 改用配置的效应系数（与 SARIMAX 干预路径保持一致）
+    future_exog = zero_intervention_holiday_columns(exog_all.iloc[len(ts): len(ts) + periods])
 
     out = kalman_forecast(
         ts,
@@ -419,9 +435,19 @@ def kalman_intervention_forecast(
     )
     if out.meta.get("method") == "kalman_uc":
         meta = dict(out.meta)
+        baseline = out.forecast
+        adjusted = apply_configured_holiday_effects(baseline, holiday_cfg, spring_festival_dates)
+        conf = meta.get("conf_int")
+        if conf is not None and len(conf):
+            try:
+                factor = (adjusted / baseline.replace(0, float("nan"))).fillna(1.0)
+                conf = conf.mul(pd.Series(factor.values, index=baseline.index), axis=0)
+            except Exception:
+                pass
+        meta["conf_int"] = conf
         meta["include_covid"] = include_covid
         meta["exog_cols"] = list(exog_all.columns)
-        out = ForecastOutput(out.forecast, meta)
+        out = ForecastOutput(adjusted, meta)
     return out
 
 

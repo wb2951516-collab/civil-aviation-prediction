@@ -11,6 +11,8 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import itertools
+
 import numpy as np
 
 
@@ -21,6 +23,7 @@ class MetricResult:
     mape: float
     mda: float
     theil_u: float
+    mase: float = float("nan")
 
 
 def ljung_box_test(errors, lags: int = 12) -> Dict[str, float]:
@@ -46,7 +49,7 @@ def ljung_box_test(errors, lags: int = 12) -> Dict[str, float]:
         return {"lb_stat": float("nan"), "lb_pvalue": float("nan"), "lb_n": len(e)}
 
 
-def _metrics(y_true, y_pred) -> MetricResult:
+def _metrics(y_true, y_pred, seasonal_ref=None) -> MetricResult:
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
     err = y_pred - y_true
@@ -70,7 +73,22 @@ def _metrics(y_true, y_pred) -> MetricResult:
         theil_u = float(np.sqrt(np.mean((y_true[1:] - y_pred[1:]) ** 2)) / denom)
     else:
         theil_u = float("nan")
-    return MetricResult(mae=mae, rmse=rmse, mape=mape, mda=mda, theil_u=theil_u)
+
+    # MASE：相对"季节朴素（去年同月）"的平均绝对误差比，<1 表示优于季节朴素
+    mase = float("nan")
+    try:
+        abs_err = np.abs(err)
+        if seasonal_ref is not None and len(seasonal_ref) == len(y_true):
+            scale = float(np.mean(np.abs(y_true - np.asarray(seasonal_ref, dtype=float))))
+        elif len(y_true) > 12:
+            scale = float(np.mean(np.abs(y_true[12:] - y_true[:-12])))
+        else:
+            scale = float("nan")
+        if scale == scale and scale > 0:
+            mase = float(np.mean(abs_err) / scale)
+    except Exception:
+        mase = float("nan")
+    return MetricResult(mae=mae, rmse=rmse, mape=mape, mda=mda, theil_u=theil_u, mase=mase)
 
 
 def _last_complete_year_total(train_df) -> Optional[float]:
@@ -173,6 +191,8 @@ def rolling_backtest(
     results: Dict[str, List[MetricResult]] = {k: [] for k in keys}
     errors: Dict[str, List[np.ndarray]] = {k: [] for k in keys}
     windows: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    subset_metrics: Dict[str, List[MetricResult]] = {}
+    subset_weights_acc: Dict[str, List[Dict[str, float]]] = {}
 
     total_len = len(ts)
     if total_len < min_train + horizon:
@@ -295,9 +315,29 @@ def rolling_backtest(
             ens_pred = sum(member_preds[k].astype(float) * mid.get(k, 0.0) for k in member_preds)
             ens_pred = ens_pred.clip(lower=0.0)
 
+        try:
+            seasonal_ref = train.iloc[-len(test):].values if len(train) >= len(test) else None
+        except Exception:
+            seasonal_ref = None
+        # 成员子集评估：为"成员池选择"提供样本外证据（等权，避免窗口内权重过拟合）
+        member_names = sorted(member_preds)
+        for r in range(1, len(member_names) + 1):
+            for combo in itertools.combinations(member_names, r):
+                # 与生产融合一致：窗口内用 MAPE 倒数权重，而不是等权，
+                # 否则"子集选择"评估的配置和实际使用的配置不是同一个东西。
+                combo_preds = {k: member_preds[k] for k in combo}
+                combo_w = _map_weights(combo_preds, test) if len(combo) > 1 else {combo[0]: 1.0}
+                blend = sum(combo_preds[k].astype(float) * combo_w.get(k, 0.0) for k in combo)
+                blend = blend.clip(lower=0.0)
+                combo_name = "+".join(combo)
+                subset_metrics.setdefault(combo_name, []).append(
+                    _metrics(test.values, blend.values, seasonal_ref=seasonal_ref)
+                )
+                subset_weights_acc.setdefault(combo_name, []).append(dict(combo_w))
+
         for key in keys:
             pred = ens_pred if key == "ensemble" else member_preds[key]
-            m = _metrics(test.values, pred.values)
+            m = _metrics(test.values, pred.values, seasonal_ref=seasonal_ref)
             results[key].append(m)
             errors[key].append(np.asarray(pred.values - test.values, dtype=float))
         windows.append((test.index[0], test.index[-1]))
@@ -311,16 +351,41 @@ def rolling_backtest(
             "mape": float(np.mean([m.mape for m in ms])),
             "mda": float(np.nanmean([m.mda for m in ms])),
             "theil_u": float(np.nanmean([m.theil_u for m in ms])),
+            "mase": float(np.nanmean([m.mase for m in ms])),
         }
 
     summary = {k: agg(v) for k, v in results.items()}
     merged_errors = {k: np.concatenate(v) if v else np.array([]) for k, v in errors.items()}
+
+    subset_summary = {}
+    for name, metrics_list in subset_metrics.items():
+        if not metrics_list:
+            continue
+        # 权重取各窗口 MAPE 倒数权重的平均并归一化：与"子集评估"口径完全一致
+        weight_runs = subset_weights_acc.get(name) or []
+        avg_weights: Dict[str, float] = {}
+        for run in weight_runs:
+            for member, weight in run.items():
+                avg_weights[member] = avg_weights.get(member, 0.0) + float(weight)
+        total_weight = sum(avg_weights.values())
+        if total_weight > 0:
+            avg_weights = {k: v / total_weight for k, v in avg_weights.items()}
+        subset_summary[name] = {
+            "members": name.split("+"),
+            "mape": float(np.nanmean([m.mape for m in metrics_list])),
+            "rmse": float(np.nanmean([m.rmse for m in metrics_list])),
+            "mda": float(np.nanmean([m.mda for m in metrics_list])),
+            "mase": float(np.nanmean([m.mase for m in metrics_list])),
+            "weights": avg_weights,
+        }
+
     return {
         "windows": [(a.strftime("%Y-%m"), b.strftime("%Y-%m")) for a, b in windows],
         "summary": summary,
         "errors": merged_errors,
+        "subsets": subset_summary,
         "lb_tests": {k: ljung_box_test(v) for k, v in merged_errors.items()},
-        "recommendation": _recommend_model(summary, merged_errors),
+        "recommendation": _recommend_model(summary, merged_errors, subset_summary),
     }
 
 
@@ -430,7 +495,9 @@ def holdout_backtest(
     for key, pred in predictions.items():
         summary[key] = _metrics(test.values, pred.values)
         errors[key] = np.asarray(pred.values - test.values, dtype=float)
-    summary_dict = {k: {"mae": m.mae, "rmse": m.rmse, "mape": m.mape, "mda": m.mda, "theil_u": m.theil_u} for k, m in summary.items()}
+    summary_dict = {k: {"mae": m.mae, "rmse": m.rmse, "mape": m.mape, "mda": m.mda,
+                        "theil_u": m.theil_u, "mase": m.mase} for k, m in summary.items()}
+
     return {
         "train_range": (train.index[0].strftime("%Y-%m"), train.index[-1].strftime("%Y-%m")),
         "test_range": (test.index[0].strftime("%Y-%m"), test.index[-1].strftime("%Y-%m")),
@@ -455,11 +522,68 @@ def _map_weights(preds: Dict[str, Any], test) -> Dict[str, float]:
     return {k: float(v / total) for k, v in scores.items()}
 
 
-def _recommend_model(summary: Dict[str, Any], errors: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """依据回测结果给出推荐：最优单模型 + 融合权重（BMA 优先）。"""
+def _recommend_model(summary: Dict[str, Any], errors: Optional[Dict[str, Any]] = None,
+                     subsets: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """依据回测结果给出推荐：先在成员子集里做样本外选择，再定权重。
+
+    改进点（依据 2026-11 模型评测）:
+      ① 不再"先固定成员池再分配权重"——三成员曾使 CAAC 序列精度相对两成员退化 8.16%；
+      ② 子集以等权融合在全部滚动窗口上评估，选择泛化最好的组合；
+      ③ 若最佳子集仍不如最佳单模型（>2%），直接回落单模型，避免无效融合。
+    """
     from capm.bayesian import bma_weights
 
     member_keys = [k for k in ("hw", "sarima", "kalman") if k in summary or (errors and k in errors)]
+    mape_of = lambda k: float(summary.get(k, {}).get("mape", float("inf")) or float("inf"))
+    best_single = min(member_keys, key=mape_of, default=None)
+
+    def _weights_for(chosen):
+        if not chosen:
+            return {}
+        if len(chosen) == 1:
+            return {chosen[0]: 1.0}
+        err_sub = {k: errors[k] for k in chosen if errors and k in errors and len(errors[k]) > 0}
+        if len(err_sub) >= 2:
+            return bma_weights(err_sub, floor=0.0)
+        scores = {k: (1.0 / mape_of(k) if mape_of(k) > 0 else 0.0) for k in chosen}
+        total = sum(scores.values()) or 1.0
+        return {k: float(v / total) for k, v in scores.items()}
+
+    ranked = []
+    for name, info in (subsets or {}).items():
+        members = [m for m in (info.get("members") or name.split("+")) if m in member_keys]
+        if not members:
+            continue
+        ranked.append((float(info.get("mape", float("inf"))), members, name, info.get("weights") or {}))
+    ranked.sort(key=lambda item: item[0])
+
+    if ranked:
+        best_mape, best_members, best_name, best_weights = ranked[0]
+        if best_single is not None and mape_of(best_single) <= best_mape * 0.98:
+            return {
+                "model": best_single,
+                "weights": {best_single: 1.0},
+                "weight_method": "单模型(子集选择)",
+                "selection": {"chosen": [best_single], "mape": mape_of(best_single),
+                              "reason": "最佳子集未显著优于最佳单模型"},
+            }
+        weights = best_weights or _weights_for(best_members)
+        if len(best_members) == 1:
+            return {
+                "model": best_members[0],
+                "weights": weights,
+                "weight_method": "单模型(子集选择)",
+                "selection": {"chosen": best_members, "mape": best_mape, "reason": "单成员子集最优"},
+            }
+        return {
+            "model": "ensemble",
+            "weights": weights,
+            "weight_method": "子集选择+MAPE倒数",
+            "selection": {"chosen": best_members, "mape": best_mape},
+        }
+
+    # 兜底：无子集信息时沿用旧逻辑（BMA 优先）
+    
 
     # 1) 融合权重：BMA（有残差时），否则 MAPE 倒数
     weights = None

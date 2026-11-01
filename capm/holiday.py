@@ -125,6 +125,45 @@ def compute_holiday_effect(year: int, month: int, holiday_cfg: Dict[str, Any], s
     return float(effect)
 
 
+def zero_intervention_holiday_columns(df):
+    """把干预外生变量中的节假日哑变量清零（训练期保留, 预测期使用配置效应系数替代）。
+
+    干预建模只提供 0/1 哑变量, 用户配置的"效应系数"无法通过缩放哑变量体现
+    （线性回归对 exog 缩放不敏感）。因此在预测期把这些哑变量清零得到"常态月"基线,
+    再乘以配置的效应系数, 既让配置真正生效, 又避免与哑变量双重叠加。
+    """
+    try:
+        if df is None or len(df.columns) == 0:
+            return df
+        out = df.copy()
+        for col in ("sf", "nd", "summer"):
+            if col in out.columns:
+                out[col] = 0.0
+        return out
+    except Exception:
+        return df
+
+
+def apply_configured_holiday_effects(forecast, holiday_cfg: Optional[Dict[str, Any]], spring_festival_dates: Dict[str, str]):
+    """按配置的效应系数对预测月份做乘法修正（春运/暑假/五一/十一/冬季）。
+
+    与 legacy 的 apply_holiday_effects 语义一致, 但只返回数值序列, 供干预引擎使用。
+    """
+    holiday_cfg = holiday_cfg or {}
+    if not holiday_cfg.get("enabled", True):
+        return forecast
+    try:
+        import numpy as np
+
+        factors = [
+            compute_holiday_effect(int(d.year), int(d.month), holiday_cfg, spring_festival_dates)
+            for d in forecast.index
+        ]
+        return forecast.__class__(forecast.values * np.asarray(factors), index=forecast.index)
+    except Exception:
+        return forecast
+
+
 def apply_holiday_effects(
     forecast,
     holiday_cfg: Dict[str, Any],
@@ -201,18 +240,26 @@ def build_intervention_exog(
 
     for d in pd.to_datetime(index):
         y, m = int(d.year), int(d.month)
-        # 春节窗口: 春节±7天覆盖该月则为1
+        # 春节窗口: 按配置的春运前后天数与影响月份判断该月是否落入窗口。
+        # (旧实现写死 ±7 天, 导致配置页的 春运前/后天数 完全无效)
         sf_hit = 0.0
         if holiday_enabled:
             try:
-                sf = get_spring_festival_date(y, spring_festival_dates).date
-                win_start = sf - timedelta(days=7)
-                win_end = sf + timedelta(days=7)
-                month_start = datetime(y, m, 1)
-                days_in_m = calendar.monthrange(y, m)[1]
-                month_end = month_start + timedelta(days=days_in_m - 1)
-                if win_end >= month_start and win_start <= month_end:
-                    sf_hit = 1.0
+                months_scope = holiday_cfg.get("spring_travel_months", [1, 2, 3])
+                if not isinstance(months_scope, list):
+                    months_scope = [1, 2, 3]
+                months_scope = [int(x) for x in months_scope]
+                if m in months_scope:
+                    before_days = int(holiday_cfg.get("spring_travel_before_days", 15))
+                    after_days = int(holiday_cfg.get("spring_travel_after_days", 24))
+                    sf = get_spring_festival_date(y, spring_festival_dates).date
+                    win_start = sf - timedelta(days=before_days)
+                    win_end = sf + timedelta(days=after_days)
+                    month_start = datetime(y, m, 1)
+                    days_in_m = calendar.monthrange(y, m)[1]
+                    month_end = month_start + timedelta(days=days_in_m - 1)
+                    if win_end >= month_start and win_start <= month_end:
+                        sf_hit = 1.0
             except Exception:
                 sf_hit = 0.0
         # 国庆窗口

@@ -61,9 +61,17 @@ def default_config() -> Dict[str, Any]:
                     "national_day_effect": 1.08,
                     "winter_peak_effect": 1.03,
                 },
-                "growth": {"annual_growth_rate": 0.027},
+                "growth": {
+                    "annual_growth_rate": 0.027,
+                    # False = 干预引擎下仅作告警基准（不修改预测值）；True = 强制校准年度总量
+                    "apply_annual_growth": False,
+                    # 年度同比目标表: [{"year": 2026, "rate": -0.10}, ...]
+                    # 行数即预测跨度（1-3 年）；为空时回退到 annual_growth_rate 的单年目标
+                    "yoy_targets": [],
+                },
                 "model": {
-                    "weight_mode": "auto",
+                    # auto = 回测推荐（可覆写模型）；manual = 严格按用户单选钮
+                    "model_mode": "auto",
                     "engine": "intervention",
                     "weights": {"hw": 0.4, "sarima": 0.4, "kalman": 0.2},
                     "sarima": {

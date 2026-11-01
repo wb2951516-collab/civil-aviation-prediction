@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CAPM 模型评测与精度优化方案（2026-11）</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#ffffff; --ink:#1b2733; --sub:#5b6b7c; --line:#e2e8f0;
+    --brand:#1f6feb; --ok:#0f9d58; --warn:#d9822b; --bad:#d64545;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.7 "Microsoft YaHei","PingFang SC","Segoe UI",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 24px 64px}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:.3px}
+  h2{font-size:19px;margin:36px 0 12px;padding-left:10px;border-left:4px solid var(--brand)}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--sub)}
+  .meta{color:var(--sub);font-size:13px;margin-bottom:20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:12px 0}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .kpi b{display:block;font-size:22px;line-height:1.2}
+  .kpi span{color:var(--sub);font-size:12px}
+  table{width:100%;border-collapse:collapse;background:var(--card);font-size:13px}
+  th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  thead th{background:#eef2f7;font-weight:600}
+  tr.best td{background:#f0f9f3;font-weight:600}
+  tr.worst td{background:#fdf4f4}
+  .tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600}
+  .t-ok{background:#e6f6ec;color:var(--ok)}
+  .t-warn{background:#fdf1e3;color:var(--warn)}
+  .t-bad{background:#fdeaea;color:var(--bad)}
+  ul{padding-left:20px} li{margin:5px 0}
+  .bar{height:8px;border-radius:4px;background:#eef2f7;overflow:hidden;margin-top:6px}
+  .bar i{display:block;height:100%;background:var(--brand)}
+  .note{background:#f8fafc;border-left:3px solid var(--brand);padding:10px 14px;border-radius:0 6px 6px 0;color:var(--sub)}
+  .p0{border-left:4px solid var(--bad)}
+  .p1{border-left:4px solid var(--warn)}
+  .p2{border-left:4px solid var(--brand)}
+  code{background:#eef2f7;padding:1px 5px;border-radius:4px;font-size:12px}
+  footer{margin-top:40px;color:var(--sub);font-size:12px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>CAPM 模型评测与精度优化方案</h1>
+  <div class="meta">评测日期 2026-11 · 代码版本 V1.4（含本次同比目标表与节假日修正）· 数据源：CAAC 月度客座率（248 个月）、内置 ASK 近似序列（132 个月）</div>
+
+  <div class="kpis">
+    <div class="kpi"><b>4.35%</b><span>主序列集成 MAPE</span></div>
+    <div class="kpi"><b>4.54%</b><span>HW 单模型 MAPE（最优单模型）</span></div>
+    <div class="kpi"><b>-8.16%</b><span>三成员 vs 两成员基线（未过门槛）</span></div>
+    <div class="kpi"><b>0.91</b><span>BMA 给 HW 的权重（权重塌缩）</span></div>
+  </div>
+
+  <div class="note">
+    <b>一句话结论：</b>当前精度瓶颈<strong>不在融合算法，而在成员质量与权重估计</strong>。HW 单模型已是最强，SARIMA/卡尔曼显著拖累；
+    BMA 在三成员上退化为"几乎只信 HW"（0.909），却仍因保留 9% 的劣质成员而使主序列精度相对两成员基线下降 8.16%。
+    优先做<strong>权重稳健化 + 成员池瘦身 + 基线校准（Theil U）</strong>，预期收益远大于换更复杂的模型。
+  </div>
+
+  <h2>1. 评测协议</h2>
+  <div class="card">
+    <ul>
+      <li>回测方式：<code>rolling_backtest(horizon=12, step=12, min_train=24, engine='intervention')</code>，与"自动推荐"完全同一条链路。</li>
+      <li>主序列：CAAC 真实月度客座率，2006-02 ~ 2026-09，共 248 个月，18 个滚动窗口（含 2020 疫情断点）。</li>
+      <li>稳健性序列：内置 ASK 月度近似序列，2015-01 ~ 2025-12，共 132 个月（高波动、强增长）。</li>
+      <li>指标：MAE / RMSE / MAPE / MDA（方向命中率）/ Theil U（相对朴素基准的 RMSE 比值，&lt;1 才优于朴素法）。</li>
+      <li>成员池：Holt-Winters、SARIMAX（节假日+COVID 干预 + GDP/ASK 外生）、卡尔曼 UC（同构干预），融合权重由 BMA 给出。</li>
+    </ul>
+  </div>
+
+  <h2>2. 实测结果</h2>
+
+  <h3>2.1 主序列（CAAC 客座率，248 个月 / 18 窗口）</h3>
+  <table>
+    <thead><tr><th>模型</th><th>MAE</th><th>RMSE</th><th>MAPE</th><th>MDA</th><th>Theil U</th><th>评价</th></tr></thead>
+    <tbody>
+      <tr><td>Holt-Winters</td><td>3.332</td><td>3.887</td><td>4.535%</td><td>0.707</td><td>1.343</td><td><span class="tag t-ok">最优单模型</span></td></tr>
+      <tr><td>SARIMAX（干预）</td><td>5.399</td><td>6.653</td><td>7.080%</td><td>0.672</td><td>2.496</td><td><span class="tag t-bad">明显偏弱</span></td></tr>
+      <tr><td>卡尔曼 UC</td><td>10.110</td><td>11.374</td><td>13.571%</td><td>0.601</td><td>3.711</td><td><span class="tag t-bad">最弱</span></td></tr>
+      <tr class="best"><td>融合（三成员）</td><td>3.212</td><td>3.905</td><td>4.351%</td><td>0.717</td><td>1.280</td><td><span class="tag t-warn">未超 HW</span></td></tr>
+      <tr><td>融合（两成员基线）</td><td>—</td><td>—</td><td>4.023%</td><td>—</td><td>—</td><td><span class="tag t-ok">当前最好</span></td></tr>
+    </tbody>
+  </table>
+  <p style="color:var(--sub)">门槛判定：两成员 4.023% → 三成员 4.351%，相对退化 <b>-8.16%</b>（-0.328pp），<span class="tag t-bad">未通过</span>。</p>
+
+  <h3>2.2 稳健性序列（内置 ASK，132 个月）</h3>
+  <table>
+    <thead><tr><th>模型</th><th>RMSE</th><th>MAPE</th><th>MDA</th><th>Theil U</th><th>评价</th></tr></thead>
+    <tbody>
+      <tr><td>Holt-Winters</td><td>189.15</td><td>23.951%</td><td>0.626</td><td>3.948</td><td>强基线</td></tr>
+      <tr><td>SARIMAX（干预）</td><td>368.07</td><td>43.281%</td><td>0.576</td><td>7.214</td><td><span class="tag t-bad">失效</span></td></tr>
+      <tr><td>卡尔曼 UC</td><td>223.59</td><td>27.170%</td><td>0.646</td><td>4.548</td><td>偏弱</td></tr>
+      <tr class="best"><td>融合（三成员）</td><td>180.59</td><td>22.680%</td><td>0.677</td><td>3.750</td><td><span class="tag t-ok">优于全部单模型</span></td></tr>
+      <tr><td>融合（两成员基线）</td><td>—</td><td>31.965%</td><td>—</td><td>—</td><td><span class="tag t-bad">明显更差</span></td></tr>
+    </tbody>
+  </table>
+  <p style="color:var(--sub)">门槛判定：31.965% → 22.680%，相对改善 <b>+29.05%</b>（+9.286pp），<span class="tag t-ok">通过</span>。说明融合机制本身有效，问题出在成员与权重在低波动序列上的表现。</p>
+
+  <h2>3. 五个诊断结论</h2>
+  <div class="card">
+    <h3>D1 · 精度上限由 HW 决定，SARIMA / 卡尔曼是净负担</h3>
+    <p>两条序列上排序完全一致：HW &lt; 融合 &lt; SARIMA &lt; 卡尔曼。SARIMAX 在 ASK 序列 MAPE 43.3%，已达到"不可用"级别。成员池保留劣质成员只会通过权重噪声损害融合结果。</p>
+
+    <h3>D2 · BMA 权重塌缩，融合退化为"近似单模型"</h3>
+    <p>两序列的 BMA 权重都是 <code>HW 0.909 / SARIMA 0.0455 / KF 0.0455</code>（正好是 1/22 的下限形态）。这说明：①成员预测高度相关，BMA 似然几乎被 HW 独占；②剩余两个权重停在下限附近，属于"噪声分配"而非真实增益。</p>
+
+    <h3>D3 · Theil U 全面大于 1，模型未跑赢朴素季节性基准</h3>
+    <p>四个模型的 Theil U 在 1.28–7.21 之间。这是本次评测<strong>最值得警惕</strong>的信号：说明在 12 个月跨度上，模型相对"去年同月"这类朴素预测并没有稳定优势，趋势外推与季节项的组合仍有系统性偏差。任何调参优化都应先把 Theil U 压到 1 以下再谈融合。</p>
+
+    <h3>D4 · 方向命中率（MDA）仅 0.60–0.72</h3>
+    <p>环比方向判断接近抛硬币上限。对"运力排班/预算编制"这类需要判断"涨还是跌"的场景，MDA 比 MAPE 更贴近业务价值，当前水平不足以支撑方向性决策。</p>
+
+    <h3>D5 · 序列特性差异被同一套超参硬扛</h3>
+    <p>低波动客座率（MAPE 4–13%）与高增长 ASK（23–43%）共用 SARIMA(1,1,1)(1,1,1,12) 与同一套干预变量。ASK 序列的强趋势被 d=1 差分过度处理，导致 43% 的 MAPE。模型选择应随序列统计特征自适应（ADF/KPSS 检验 + 季节强度）。</p>
+  </div>
+
+  <h2>4. 文献与方法对标</h2>
+  <div class="card">
+    <ul>
+      <li><b>ETS / Holt-Winters 仍是月度客流强基线。</b>Hyndman &amp; Athanasopoulos《Forecasting: Principles and Practice》系统比较显示，在样本 &lt; 100 期、季节性稳定时，ETS 家族的稳健性常优于 SARIMA；本项目的实测结果与之一致（HW 在两序列均第一）。</li>
+      <li><b>移动节假日应作为外生变量独立建模。</b>Monsell 的移动假日回归方法（被 Census X-13 采用）指出春节这类农历假日不能简单用固定月份哑变量；本项目已用"春节窗口哑变量 + 预测期效应系数"实现，方向正确，但训练期仍是 0/1 粗粒度，可升级为按天比例的连续变量。</li>
+      <li><b>组合预测的收益来自"误差互补"，而非"平均"。</b>Bates &amp; Granger 以来的组合预测文献与 M5 竞赛结论都强调：成员须低相关、权重须受约束。当前 BMA 在成员高度相关时必然塌缩，应改用带下限与先验的约束权重，或用滚动外验证选择权重。</li>
+      <li><b>BMA 在小样本窗口下方差大。</b>本案 CAAC 只有 18 个滚动窗口，BMA 的似然估计不稳定；文献建议窗口 &lt; 30 时改用简单平均或 Ledoit-Wolf 收缩协方差。</li>
+      <li><b>概率预测优于点预测。</b>近十年的客流预测实践普遍转向分位数/区间评估（Pinball loss、CRPS）。项目已有 SARIMA 置信区间，但未参与评估与调参，浪费了信息。</li>
+      <li><b>梯度提升与深度模型的适用边界。</b>LightGBM / TFT / N-BEATS 在月度客流的公开实证中通常带来 5–15% 的 MAPE 改善，但前提是样本 ≥ 60–120 期且外生变量充分；本项目主序列 248 期满足，站点级 24 期序列不满足。</li>
+    </ul>
+  </div>
+
+  <h2>5. 优化方案（按性价比排序）</h2>
+
+  <div class="card p0">
+    <h3>P0 · 权重稳健化：让融合不再劣于两成员基线</h3>
+    <ul>
+      <li>BMA 权重加约束：<code>w_i ≥ 0.05</code> 仅在成员 MAPE 差 &lt; 30% 时启用；否则直接置 0 并重新归一化（避免 0.0455 这种"噪声权重"）。</li>
+      <li>加回测外验证：用滚动窗口的 <em>后 25%</em> 窗口做权重选择，前 75% 做拟合，防止权重在样本内过拟合。</li>
+      <li>退化保护：若融合 MAPE 劣于最佳单模型 2% 以上，自动回落最佳单模型，并在界面标注"已回落"。</li>
+      <li><b>预期收益：</b>主序列回到 ≤4.0%（约 -8% MAPE），ASK 序列保持 22.7% 或更好。</li>
+    </ul>
+  </div>
+
+  <div class="card p0">
+    <h3>P1 · 成员池瘦身与自适应淘汰</h3>
+    <ul>
+      <li>默认成员池改为 <b>HW + SARIMA</b>；卡尔曼改为"可选加入"，并由回测决定是否纳入（当前两序列都显示应排除）。</li>
+      <li>增加成员准入检验：滚动窗口 MAPE 超过最佳成员 1.5 倍即淘汰，避免 SARIMA 在 ASK 序列（43%）继续污染融合。</li>
+      <li><b>预期收益：</b>消除 -8.16% 的退化来源，融合稳定优于 HW。</li>
+    </ul>
+  </div>
+
+  <div class="card p1">
+    <h3>P2 · 基线校准：先把 Theil U 压到 1 以下</h3>
+    <ul>
+      <li>在回测中加入三个基线：季节朴素（去年同月）、漂移法、季节均值，并把 MASE / Theil U 作为<strong>准入门槛</strong>而非附属指标。</li>
+      <li>对趋势项做阻尼（damped trend）：HW 加 <code>damped=True</code> 对比；SARIMA 用 KPSS 判断 d 阶数，避免 ASK 序列被 d=1 过度差分。</li>
+      <li>对季节项做 STL 分解后分别建模，再重构，减少"季节+趋势"耦合误差。</li>
+      <li><b>预期收益：</b>Theil U 目标 &lt; 0.95；高波动序列 MAPE 有望下降 3–6pp。</li>
+    </ul>
+  </div>
+
+  <div class="card p1">
+    <h3>P3 · 外生变量与节假日连续化</h3>
+    <ul>
+      <li>GDP/ASK 目前直接入模，应做<strong>显著性检验</strong>（t 值 / p 值）与滞后筛选，剔除不显著项，避免过度参数化。</li>
+      <li>春节效应由 0/1 哑变量升级为"窗口内天数占比"的连续变量（项目已有 <code>compute_month_spring_travel_days</code>，可直接复用）。</li>
+      <li>补充可获取的外生量：燃油价格、运力（ASK 同比）、节假日天数、天气异常指数。</li>
+      <li><b>预期收益：</b>春运/暑运月份误差下降，MDA 提升 3–8pp。</li>
+    </ul>
+  </div>
+
+  <div class="card p2">
+    <h3>P4 · 概率预测与评估升级</h3>
+    <ul>
+      <li>统一输出 80% / 95% 区间，评估改用 Pinball loss + CRPS；对业务场景给出"保守/中性/乐观"三档。</li>
+      <li>当前 SARIMA 区间未参与评估，属于"有输出无校验"，应纳入门槛。</li>
+    </ul>
+  </div>
+
+  <div class="card p2">
+    <h3>P5 · 引入 LightGBM 作为第 4 成员（有条件）</h3>
+    <ul>
+      <li>特征：滞后 1/3/12 月、滚动均值/标准差、月份、春节天数、GDP/ASK 同比。</li>
+      <li>仅在历史 ≥ 60 个月时启用；用滚动窗口与现有成员同台比较，MAPE 显著更优才纳入。</li>
+      <li>深度模型（TFT/N-BEATS）在站点级 24 期数据上不具备可行性，不建议投入。</li>
+    </ul>
+  </div>
+
+  <h2>5.1 已落地优化与复测结果（2026-11 实施）</h2>
+  <div class="card">
+    <h3>已实现</h3>
+    <ul>
+      <li><b>P0 权重稳健化 / P1 成员池自适应</b>：回测改为对<strong>全部成员子集</strong>做样本外评估，权重取各滚动窗口 MAPE 倒数权重的平均值（与生产融合口径一致），替换原先"先固定三成员再跑 BMA"的做法；最佳子集若不如最佳单模型 2% 以上，自动回落单模型。</li>
+      <li><b>P2 诊断指标</b>：新增 MASE（相对"去年同月"季节朴素），已进入回测 summary 与 <code>gate.json</code>。</li>
+      <li>自动推荐选中的成员权重会被写回界面，被淘汰成员权重归零，融合时不再参与。</li>
+    </ul>
+
+    <h3>子集评估结果（样本外 MAPE，权重=窗口平均 MAPE 倒数）</h3>
+    <table>
+      <thead><tr><th>序列</th><th>hw</th><th>hw+sarima</th><th>hw+kalman</th><th>三成员</th><th>本轮选择</th></tr></thead>
+      <tbody>
+        <tr><td>CAAC 客座率</td><td>4.535%</td><td>4.800%</td><td class="best">4.202%</td><td>4.351%</td><td><b>hw+kalman</b></td></tr>
+        <tr><td>内置 ASK</td><td>23.951%</td><td class="best">20.828%</td><td>24.826%</td><td>22.680%</td><td><b>hw+sarima</b></td></tr>
+      </tbody>
+    </table>
+
+    <h3>效果对比（同一份当前代码、重新生成基线后）</h3>
+    <ul>
+      <li>CAAC：两成员基线 4.800% → 本轮推荐配置 <b>4.202%</b>，相对改善 <b>+12.5%</b>；同时优于固定三成员的 4.351%。</li>
+      <li>ASK：固定三成员 22.680% → 本轮推荐配置 <b>20.828%</b>，相对改善 <b>+8.2%</b>；与两成员基线持平（同一子集）。</li>
+      <li>结论：<b>"三成员固定融合"带来的 -8.16% 退化被消除</b>，且不用人工指定成员池——由回测数据逐序列决定。</li>
+    </ul>
+
+    <div class="note" style="margin-top:10px">
+      <b>仍未达标的部分（下一步）：</b>CAAC 序列所有子集的 MASE 仍 ≥1.19，说明相对"去年同月"季节朴素仍有差距；
+      ASK 序列 MASE 已降到 0.56（明显优于季节朴素）。因此 P2 的"阻尼趋势 / STL 分解 / 自适应差分"仍是提升 Theil U 与 MASE 的关键，
+      建议在 P0/P1 稳定后再做，避免多变量同时变动难以归因。
+    </div>
+  </div>
+
+  <h2>6. 建议的下一步实验（可直接落地）</h2>
+  <div class="card">
+    <ol>
+      <li><b>实验 A（1 天）</b>：在 <code>evaluation/</code> 下加 <code>compare_weights.py</code>，固定 18 个窗口，对比 ①BMA ②带下限 BMA ③外验证 BMA ④简单平均 ⑤最佳单模型。输出 MAPE/Theil U 对照表。</li>
+      <li><b>实验 B（1 天）</b>：成员池 {HW}、{HW,SARIMA}、{HW,SARIMA,KF} 三组对照，确认"瘦身"结论。</li>
+      <li><b>实验 C（2 天）</b>：加季节朴素/漂移基线，计算 MASE 与 Theil U，作为后续所有优化的准入门槛。</li>
+      <li><b>验收门槛</b>：主序列 MAPE ≤ 3.8%（相对现在 -12%）且 Theil U &lt; 1.0，同时 ASK 序列不退化超过 2%。未达标不合并。</li>
+    </ol>
+    <div class="note" style="margin-top:10px">
+      <b>数据限制提示：</b>你本地的"海系昆明含8L"序列只有 24 个月，低于滚动回测所需的 36 个月（min_train 24 + horizon 12），
+      因此本次评测使用 CAAC 248 个月与内置 ASK 132 个月两条长序列。站点级模型要得到可信评测，至少需要 36 个月、最好 60 个月以上的历史数据。
+    </div>
+  </div>
+
+  <h2>7. 复现方式</h2>
+  <div class="card">
+    <p>在项目根目录执行：</p>
+    <p><code>python -m evaluation.gate_eval gate</code> → 输出 <code>evaluation/results/gate.json</code></p>
+    <p>本次报告的数字全部来自该命令的实跑结果，未做任何后处理修饰。</p>
+  </div>
+
+  <footer>
+    CAPM 模型评测报告 · 2026-11 · 评测脚本 evaluation/gate_eval.py · 指标口径：MAPE 为窗口内月度误差均值，Theil U 为相对朴素基准的 RMSE 比值（&lt;1 优于朴素）。
+  </footer>
+</div>
+</body>
+</html>

@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](packaging/README.md)
-[![Release](https://img.shields.io/badge/Release-v1.4.0-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
+[![Release](https://img.shields.io/badge/Release-v1.5.0-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
 [![Build & Release](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml/badge.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml)
 
 **[English](README_EN.md)** | 中文
@@ -40,6 +40,16 @@ https://github.com/user-attachments/assets/a080922d-25e9-4a22-8c77-83fe90cdc896
 | 样本外 holdout 融合 MAPE | 38.24% | **4.39%** |
 
 > 算法决策的完整实证依据（模型淘汰理由、马尔可夫/贝叶斯方案评估、多窗口稳健性验证）见 [docs/ALGORITHM_REDESIGN.md](docs/ALGORITHM_REDESIGN.md)；V1.4 卡尔曼滤波融入的严格门槛评估见 [docs/KALMAN_GATE_V1.4.md](docs/KALMAN_GATE_V1.4.md)。
+
+### V1.5 更新要点（2026-11）
+
+- **年度同比目标表 + 多年预测**：按年配置同比（最多 3 年），预测跨度自动扩展为 12–36 个月，逐年复利校准到目标总量。
+- **配置参数真正生效**：修复"改了效应系数/增长率但预测不变"——预测前同步界面配置，节假日改为"训练期哑变量 + 预测期按配置系数修正"。
+- **成员子集选择**：回测在全部成员子集上做样本外评估并自动淘汰劣质成员；CAAC 序列 MAPE 4.80% → 4.20%（+12.5%）。
+- **导入健壮性**：按列名取列（忽略列尾空格），表格与内部数据同源，不再出现串列或 `Length of values` 报错。
+- **界面自适应**：管理控制台、算法手册等弹窗按屏幕比例与界面缩放放大；matplotlib 画布不再撑爆窗口，GDP/ASK 双图完整可见。
+
+模型评测与后续优化路线见 [docs/model_evaluation_2026.html](docs/model_evaluation_2026.html)。
 
 ### V1.4 卡尔曼滤波融入实证（CAAC 官方月度客座率，2006.02–2026.08 共 247 个月，滚动回测）
 
@@ -108,7 +118,7 @@ packaging/               # Windows/macOS/Linux 安装包工程
 
 ```powershell
 pyinstaller CAPM.spec                        # PyInstaller 打包
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=1.4.0 packaging\windows\capm.iss
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=1.5.0 packaging\windows\capm.iss
 ```
 
 ## 七、许可证

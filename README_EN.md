@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
-[![Release](https://img.shields.io/badge/Release-v1.4.0-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
+[![Release](https://img.shields.io/badge/Release-v1.5.0-orange.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/releases)
 [![Build & Release](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml/badge.svg)](https://github.com/wb2951516-collab/civil-aviation-prediction/actions/workflows/release.yml)
 
 **English** | [中文](README.md)

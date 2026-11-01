@@ -31,7 +31,13 @@ from capm.backtest import recommend_weights_from_backtest, rolling_backtest
 from capm.column_resizer import ColumnResizer
 from capm.config_store import ConfigStore
 from capm.datasource import ExternalDataManager
-from capm.growth import apply_annual_growth_adjustment, growth_sanity_check
+from capm.growth import (
+    apply_annual_growth_adjustment,
+    apply_yoy_targets,
+    growth_sanity_check,
+    growth_sanity_check_targets,
+    normalize_yoy_targets,
+)
 from capm.holiday import (
     apply_holiday_effects,
     build_intervention_exog,
@@ -185,6 +191,34 @@ class TreeviewTooltip:
 
 APP_WINDOW_TITLE = "民航旅客运输量预测系统"
 
+HISTORY_COLUMNS = ("年份", "月份", "旅客运输量")
+
+
+class ImportColumnAmbiguous(ValueError):
+    """导入时无法唯一确定旅客运输量列, 需要用户手动选择。"""
+
+    def __init__(self, candidates):
+        self.candidates = [str(c).strip() for c in candidates]
+        super().__init__("存在多个候选列, 请选择旅客运输量数据源: " + "、".join(self.candidates))
+
+
+def _coerce_int(value) -> int:
+    """把 Excel 单元格值转为整数: 容忍千分位/空格/浮点, NaN 或非法值抛 ValueError。"""
+    if value is None:
+        raise ValueError("空值")
+    if isinstance(value, str):
+        text = str(value).strip().replace(",", "").replace("，", "")
+        if not text:
+            raise ValueError("空值(空白文本)")
+        value = float(text)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"无法转为数值({value!r})")
+    if number != number:  # NaN
+        raise ValueError("空值(NaN)")
+    return int(round(number))
+
 
 def _screen_geometry(win, width: int, height: int, parent=None, margin: int = 48, min_w: int = 320, min_h: int = 240):
     """计算自适应窗口几何：尺寸不超屏幕可用区域，相对父窗口居中（无父窗口则屏幕居中）。
@@ -222,44 +256,38 @@ def _screen_geometry(win, width: int, height: int, parent=None, margin: int = 48
     return f"{w}x{h}+{x}+{y}", w, h
 
 
-def _apply_geometry(win, width: int, height: int, parent=None, margin: int = 48, min_w: int = 320, min_h: int = 240):
-    """为 Toplevel 弹窗应用自适应几何：居中 + 最小/最大尺寸约束（可拖动）。"""
-    geo, w, h = _screen_geometry(win, width, height, parent, margin, min_w, min_h)
-    try:
-        win.geometry(geo)
-        win.minsize(int(min_w), int(min_h))
-        screen_w = win.winfo_screenwidth()
-        screen_h = win.winfo_screenheight()
-        win.maxsize(max(int(min_w), screen_w - 16), max(int(min_h), screen_h - 16))
-    except Exception:
-        pass
-    return geo
+def _scaled_dialog_geometry(win, base_w: int, base_h: int, parent=None, margin: int = 48,
+                            min_w: int = 320, min_h: int = 240, max_ratio: float = 0.92,
+                            ui_scale: float = 1.0, content_w: int = 0, content_h: int = 0,
+                            ratio_w: float = 0.0, ratio_h: float = 0.0):
+    """统一弹窗几何计算: 屏幕比例 × ui_scale, 同时满足基准/内容/最小值, 上限留边。
 
-
-def _content_fit_geometry(win, parent, base_w: int, base_h: int, min_w: int = 320, min_h: int = 240, margin: int = 48, max_ratio: float = 0.9):
-    """按窗口实际内容需求自动计算初始尺寸：初始尺寸 = max(基准, 内容需求) 且不超过屏幕可用区域。
-
-    先 update_idletasks 读取 winfo_reqwidth/reqheight（内容控件布局实际所需宽高），
-    再复用 _screen_geometry 做屏幕约束与相对父窗口居中，最后设置 minsize/maxsize。
-    解决"弹窗初始尺寸过小、内容显示不全、需手动拉伸"的问题。
+    历史缺陷: 旧实现只做 min(width, screen-margin) —— 只会缩小不会放大,
+    大屏上弹窗永远停留在固定像素宽度(如管理控制台恒为 920px)。
+    这里同时考虑四个下界(基准×缩放、屏幕比例、内容需求、最小尺寸)并统一取上限。
     """
-    try:
-        win.update_idletasks()
-        req_w = int(win.winfo_reqwidth())
-        req_h = int(win.winfo_reqheight())
-    except Exception:
-        req_w, req_h = 0, 0
     try:
         screen_w = win.winfo_screenwidth()
         screen_h = win.winfo_screenheight()
     except Exception:
         screen_w, screen_h = 1920, 1080
+    try:
+        ui_scale = max(0.8, min(1.5, float(ui_scale or 1.0)))
+    except Exception:
+        ui_scale = 1.0
+    try:
+        ratio_w = max(0.0, float(ratio_w or 0.0))
+        ratio_h = max(0.0, float(ratio_h or 0.0))
+    except Exception:
+        ratio_w = ratio_h = 0.0
 
-    # 尺寸 = max(基准, 内容需求)，并限制在屏幕可用区域（max_ratio）内
-    w = max(int(min_w), int(base_w), req_w)
-    h = max(int(min_h), int(base_h), req_h)
-    w = min(w, max(int(min_w), int(screen_w * max_ratio) - margin))
-    h = min(h, max(int(min_h), int(screen_h * max_ratio) - margin))
+    cap_w = max(int(min_w), int(screen_w * max_ratio) - margin)
+    cap_h = max(int(min_h), int(screen_h * max_ratio) - margin)
+
+    w = max(int(min_w), int(base_w * ui_scale), int(content_w), int(screen_w * ratio_w))
+    h = max(int(min_h), int(base_h * ui_scale), int(content_h), int(screen_h * ratio_h))
+    w = min(w, cap_w)
+    h = min(h, cap_h)
 
     geo, _, _ = _screen_geometry(win, w, h, parent, margin=0, min_w=int(min_w), min_h=int(min_h))
     try:
@@ -268,6 +296,59 @@ def _content_fit_geometry(win, parent, base_w: int, base_h: int, min_w: int = 32
         win.maxsize(max(int(min_w), screen_w - 16), max(int(min_h), screen_h - 16))
     except Exception:
         pass
+    return geo, w, h
+
+
+def _embed_figure_canvas(parent, fig, min_height: int = 260, padx: int = 8, pady: int = 6):
+    """把 matplotlib 画布嵌入容器, 并隔离它的"请求尺寸"。
+
+    matplotlib 在 Tk 下会把画布组件尺寸设为 figsize×dpi×device_pixel_ratio;
+    当 tk scaling 被放大(高 DPI / 150% 界面缩放)时, 请求尺寸可膨胀到 3-4 倍物理像素,
+    从而把弹窗撑得远超屏幕: 后续子图(如 ASK 曲线)与底部按钮被挤出可视区。
+    这里用 place 让画布不参与父容器尺寸计算, 父容器只保留一个可控的最小高度。
+    """
+    holder = tk.Frame(parent, bg=T_COLORS["bg_card"], height=max(120, int(min_height)))
+    holder.pack(fill=tk.BOTH, expand=True, padx=padx, pady=pady)
+    try:
+        holder.pack_propagate(False)
+    except Exception:
+        pass
+    canvas = FigureCanvasTkAgg(fig, master=holder)
+    widget = canvas.get_tk_widget()
+    widget.place(x=0, y=0, relwidth=1, relheight=1)
+    return canvas
+
+
+def _apply_geometry(win, width: int, height: int, parent=None, margin: int = 48, min_w: int = 320, min_h: int = 240,
+                    ui_scale: float = 1.0, ratio_w: float = 0.0, ratio_h: float = 0.0):
+    """为 Toplevel 弹窗应用自适应几何: 屏幕比例 + 缩放 + 居中 + 最小/最大尺寸约束（可拖动）。"""
+    geo, _, _ = _scaled_dialog_geometry(
+        win, width, height, parent=parent, margin=margin, min_w=min_w, min_h=min_h,
+        ui_scale=ui_scale, ratio_w=ratio_w, ratio_h=ratio_h,
+    )
+    return geo
+
+
+def _content_fit_geometry(win, parent, base_w: int, base_h: int, min_w: int = 320, min_h: int = 240,
+                          margin: int = 48, max_ratio: float = 0.9,
+                          ui_scale: float = 1.0, ratio_w: float = 0.0, ratio_h: float = 0.0):
+    """按窗口实际内容需求自动计算初始尺寸: max(基准×缩放, 屏幕比例, 内容需求) 且不超过屏幕可用区域。
+
+    先 update_idletasks 读取 winfo_reqwidth/reqheight（内容控件布局实际所需宽高），
+    再复用 _scaled_dialog_geometry 做屏幕约束与相对父窗口居中。
+    注意: 内嵌 matplotlib 画布的弹窗不要依赖该内容的 req 尺寸（figsize×dpi 不代表真实需求）。
+    """
+    try:
+        win.update_idletasks()
+        req_w = int(win.winfo_reqwidth())
+        req_h = int(win.winfo_reqheight())
+    except Exception:
+        req_w, req_h = 0, 0
+    geo, _, _ = _scaled_dialog_geometry(
+        win, base_w, base_h, parent=parent, margin=margin, min_w=min_w, min_h=min_h,
+        max_ratio=max_ratio, ui_scale=ui_scale, content_w=req_w, content_h=req_h,
+        ratio_w=ratio_w, ratio_h=ratio_h,
+    )
     return geo
 
 
@@ -342,8 +423,9 @@ class FinalForecastApp:
         try:
             screen_w = self.root.winfo_screenwidth()
             screen_h = self.root.winfo_screenheight()
-            win_w = min(1400, max(960, int(screen_w * 0.88)))
-            win_h = min(900, max(640, int(screen_h * 0.88)))
+            # 只保留合理的上限（避免超宽屏铺满难以阅读），不再用 1400x900 硬顶限制大屏
+            win_w = min(2000, max(960, int(screen_w * 0.86)))
+            win_h = min(1200, max(640, int(screen_h * 0.86)))
             x = max(0, (screen_w - win_w) // 2)
             y = max(0, (screen_h - win_h) // 2)
             self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
@@ -396,12 +478,13 @@ class FinalForecastApp:
 
         # 命名事件唤醒通道（新启动实例通知本实例恢复窗口）
         self._wakeup_event = None
+        self._wakeup_after_id = None
         if os.name == "nt":
             try:
                 from capm.single_instance import create_wakeup_event
 
                 self._wakeup_event = create_wakeup_event()
-                self.root.after(400, self._poll_wakeup_loop)
+                self._wakeup_after_id = self.root.after(400, self._poll_wakeup_loop)
             except Exception:
                 self._wakeup_event = None
 
@@ -414,7 +497,7 @@ class FinalForecastApp:
         图表画布），mainloop 随即退出；后台线程均为 daemon，不阻塞进程结束。
         """
         try:
-            for attr in ("forecast_resizer", "history_resizer"):
+            for attr in ("forecast_resizer", "history_resizer", "admin_resizer"):
                 resizer = getattr(self, attr, None)
                 if resizer is not None and hasattr(resizer, "shutdown"):
                     try:
@@ -423,6 +506,12 @@ class FinalForecastApp:
                         pass
         except Exception:
             pass
+        try:
+            if getattr(self, "_wakeup_after_id", None) is not None:
+                self.root.after_cancel(self._wakeup_after_id)
+                self._wakeup_after_id = None
+        except Exception:
+            self._wakeup_after_id = None
         try:
             self.root.destroy()
         except Exception:
@@ -440,9 +529,11 @@ class FinalForecastApp:
             pass
         try:
             if self.root.winfo_exists():
-                self.root.after(400, self._poll_wakeup_loop)
+                self._wakeup_after_id = self.root.after(400, self._poll_wakeup_loop)
+            else:
+                self._wakeup_after_id = None
         except Exception:
-            pass
+            self._wakeup_after_id = None
 
     def _restore_main_window(self):
         """恢复并前置主窗口（被新启动实例唤醒时调用）。"""
@@ -683,6 +774,13 @@ class FinalForecastApp:
     def _reset_scale(self):
         self._set_scale(1.0)
 
+    def _ui_scale(self) -> float:
+        """当前界面缩放系数（0.8–1.5），供弹窗几何与列宽计算复用。"""
+        try:
+            return max(0.8, min(1.5, float(self.ui_scale_var.get() or 1.0)))
+        except Exception:
+            return 1.0
+
     def _on_ctrl_mousewheel_zoom(self, event):
         delta = 0
         try:
@@ -722,7 +820,7 @@ class FinalForecastApp:
         tk.Label(title_frame, text="民航旅客运输量预测系统",
                  font=('微软雅黑', 20, 'bold'), bg='#f0f0f0').pack()
 
-        tk.Label(title_frame, text="春运比例拆分 + 干预引擎集成 + 卡尔曼滤波 (V1.4)",
+        tk.Label(title_frame, text="春运比例拆分 + 干预引擎集成 + 卡尔曼滤波 (V1.5)",
                  font=('微软雅黑', 11), bg='#f0f0f0', fg='#666').pack()
 
         # 控制面板（卡片化分组）
@@ -750,13 +848,15 @@ class FinalForecastApp:
         self.model_var = tk.StringVar(value="ensemble")
         models = [("融合模型", "ensemble"), ("Holt-Winters", "hw"), ("SARIMA", "sarima"), ("卡尔曼滤波", "kalman")]
         for text, value in models:
-            ttk.Radiobutton(right_controls, text=text, variable=self.model_var,
-                            value=value).pack(side=tk.LEFT, padx=3, pady=4)
+            ttk.Radiobutton(right_controls, text=text, variable=self.model_var, value=value,
+                            command=lambda v=value: self._on_model_radio(v)).pack(side=tk.LEFT, padx=3, pady=4)
 
-        # 模式：自动推荐（默认）/ 手动选择
-        self.model_mode_var = tk.StringVar(value="auto")
+        # 模式：自动推荐（回测驱动，可覆写模型）/ 手动选择（严格按单选钮）
+        saved_mode = str(self.model_cfg.get("model_mode", "auto") or "auto")
+        self.model_mode_var = tk.StringVar(value=saved_mode if saved_mode in ("auto", "manual") else "auto")
         ttk.Checkbutton(right_controls, text="自动推荐", variable=self.model_mode_var,
-                        onvalue="auto", offvalue="manual").pack(side=tk.LEFT, padx=(8, 2), pady=4)
+                        onvalue="auto", offvalue="manual",
+                        command=self._on_mode_toggle).pack(side=tk.LEFT, padx=(8, 2), pady=4)
 
         ttk.Button(right_controls, text="运行预测", style="Modern.TButton",
                    command=self.run_forecast).pack(side=tk.LEFT, padx=6, pady=4)
@@ -930,11 +1030,6 @@ class FinalForecastApp:
 
         advanced_frame = tk.Frame(config_frame, bg=T_COLORS["bg_card"])
         advanced_frame.pack(fill=tk.X, pady=5)
-
-        weight_mode = self.model_cfg.get("weight_mode", "auto")
-        self.weight_mode_var = tk.StringVar(value=weight_mode if weight_mode in ["manual", "auto"] else "auto")
-        ttk.Radiobutton(advanced_frame, text="手动权重", variable=self.weight_mode_var, value="manual").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(advanced_frame, text="自动权重(回测)", variable=self.weight_mode_var, value="auto").pack(side=tk.LEFT, padx=5)
 
         # 预测引擎：干预集成(默认, 节假日/COVID 入 exog, 无后处理) / 传统管线
         engine = self.model_cfg.get("engine", "intervention")
@@ -1167,10 +1262,10 @@ class FinalForecastApp:
             tk.Label(frame, text=label_text, bg='#f9f9f9', width=15, anchor='w').pack(side=tk.LEFT)
 
             if var_name == 'annual_growth_rate':
-                # 增长率使用百分比输入
+                # 增长率使用百分比输入（允许负值：业务压降场景；下限 -20% 防止 (1+r)^n 失去意义）
                 var = tk.DoubleVar(value=default_value * 100)
                 self.config_vars[var_name] = var
-                spinbox = ttk.Spinbox(frame, from_=0.0, to=20.0, increment=0.1,
+                spinbox = ttk.Spinbox(frame, from_=-20.0, to=30.0, increment=0.1,
                                       textvariable=var, width=8)
                 spinbox.pack(side=tk.LEFT, padx=10)
                 tk.Label(frame, text="%", bg='#f9f9f9').pack(side=tk.LEFT)
@@ -1180,6 +1275,40 @@ class FinalForecastApp:
                 spinbox = ttk.Spinbox(frame, from_=0.8, to=1.5, increment=0.01,
                                       textvariable=var, width=8)
                 spinbox.pack(side=tk.LEFT, padx=10)
+
+        # 增长率是否强制校准年度总量（默认关 = 干预引擎下仅作告警基准）
+        self.growth_apply_var = tk.BooleanVar(value=bool(self.growth_cfg.get("apply_annual_growth", False)))
+        ttk.Checkbutton(
+            config_frame,
+            text="按设定增长率强制校准年度总量（关闭时仅作告警基准，不修改预测值）",
+            variable=self.growth_apply_var,
+        ).pack(anchor="w", pady=(2, 4))
+
+        # ---- 年度同比目标表：行数 = 预测跨度（1-3 年），逐行配置同比% ----
+        yoy_frame = tk.LabelFrame(config_frame, text="年度同比目标（每行 1 年，预测跨度=行数，最多 3 年）",
+                                  bg="#f9f9f9")
+        yoy_frame.pack(fill=tk.X, pady=6)
+        self.yoy_tree = ttk.Treeview(yoy_frame, columns=("year", "rate"), show="headings",
+                                     height=3, style="Modern.Treeview")
+        self.yoy_tree.heading("year", text="年份")
+        self.yoy_tree.heading("rate", text="同比 %")
+        self.yoy_tree.column("year", width=100, anchor=tk.CENTER)
+        self.yoy_tree.column("rate", width=100, anchor=tk.CENTER)
+        self.yoy_tree.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=6)
+        yoy_btns = tk.Frame(yoy_frame, bg="#f9f9f9")
+        yoy_btns.pack(side=tk.RIGHT, padx=8, pady=6)
+        ttk.Button(yoy_btns, text="添加一年", style="Secondary.TButton",
+                   command=self._add_yoy_row).pack(side=tk.TOP, fill=tk.X, pady=1)
+        ttk.Button(yoy_btns, text="编辑同比", style="Secondary.TButton",
+                   command=self._edit_yoy_row).pack(side=tk.TOP, fill=tk.X, pady=1)
+        ttk.Button(yoy_btns, text="删除选中", style="Danger.TButton",
+                   command=self._delete_yoy_row).pack(side=tk.TOP, fill=tk.X, pady=1)
+        self.yoy_tree.bind("<Double-1>", lambda event: self._edit_yoy_row())
+        self._load_yoy_targets_to_ui()
+        try:
+            self.config_vars["annual_growth_rate"].trace_add("write", self._on_growth_rate_changed)
+        except Exception:
+            pass
 
         spring_frame = tk.LabelFrame(config_frame, text="春运时间设置", bg="#f9f9f9")
         spring_frame.pack(fill=tk.X, pady=10)
@@ -1236,6 +1365,15 @@ class FinalForecastApp:
         after_days = int(self.holiday_cfg.get("spring_travel_after_days", 24))
         total_days = before_days + after_days + 1
         growth_pct = float(self.growth_cfg.get("annual_growth_rate", 0.027)) * 100
+        growth_apply = bool(self.growth_cfg.get("apply_annual_growth", False))
+        if growth_apply:
+            growth_note = (f"   - 当前：【强制校准已开启】预测年度总量将调整到 上年总量 × (1 + {growth_pct:.2f}%)\n"
+                           f"   - 计算公式：当年总量 = 上年总量 × (1 + {growth_pct:.2f}%)\n"
+                           f"   - 增长率按月均分配；该模式会覆盖节假日效应与模型趋势（仅保留月度分布），请确认业务合理性")
+        else:
+            growth_note = (f"   - 当前：【仅告警】设定值 {growth_pct:.2f}% 作为基准，不修改预测值\n"
+                           f"   - 预测引擎（干预集成）由 SARIMAX 趋势/季节项决定走势，节假日与 COVID 进入外生变量\n"
+                           f"   - 若偏差超过阈值会弹窗告警；需要强制达标请勾选上方“按设定增长率强制校准年度总量”")
         config_info = f"""
         系统配置说明：
 
@@ -1243,11 +1381,12 @@ class FinalForecastApp:
            - 春运时间窗口：春节前{before_days}天到春节后{after_days}天（合计{total_days}天）
            - 效应按实际影响天数比例分配到各月份
            - 公式：效应 = 1 + (春运天数/月份天数) × (基础效应-1)
+           - 注意：干预集成引擎在训练期用 0/1 哑变量学习历史节假日强度，
+             预测月份按下列效应系数做乘法修正（与哑变量不重复叠加）
+           - 修改下方任一效应系数 / 春运前后天数 / 影响月份，都会直接改变预测结果
 
         2. 年度增长率：
-           - 每年总旅客运输量环比增长{growth_pct:.2f}%
-           - 计算公式：当年总量 = 上年总量 × (1 + {growth_pct:.2f}%)
-           - 增长率按月均分配，确保年度总增长率达标
+{growth_note}
 
         3. 假日效应：
            - 固定假日：五一、十一、暑假
@@ -1338,6 +1477,203 @@ class FinalForecastApp:
             self.stats_text.delete(1.0, tk.END)
             self.stats_text.insert(1.0, stats_text)
 
+    # ------------------------------------------------------------------
+    # 历史数据解析（导入链路唯一入口）: 一律按列名取列, 表格与 self.data 同源
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _norm_column_map(df) -> Dict[str, object]:
+        """列名 -> 原始列对象的映射, 键已去除首尾空格。
+
+        实测用户文件存在 "非8L " / "8L " 这类带尾随空格的列名, 不归一化会匹配失败。
+        """
+        return {str(c).strip(): c for c in df.columns}
+
+    def _resolve_value_column(self, df, value_column=None):
+        """确定旅客运输量所在的真实列名; 无法唯一确定时抛 ImportColumnAmbiguous。"""
+        norm = self._norm_column_map(df)
+        if value_column is not None:
+            key = str(value_column).strip()
+            if key not in norm:
+                raise ValueError(f"未找到列「{value_column}」(列名首尾空格会被忽略)")
+            return norm[key]
+
+        # 1) 精确列名优先
+        for exact in ("旅客运输量", "旅客运量"):
+            if exact in norm:
+                return norm[exact]
+
+        # 2) 关键词唯一命中
+        fuzzy = [c for n, c in norm.items() if "运输量" in n or ("旅客" in n and "运输" in n)]
+        if len(fuzzy) == 1:
+            return fuzzy[0]
+        if len(fuzzy) > 1:
+            raise ImportColumnAmbiguous(fuzzy)
+
+        # 3) 兜底: 年份/月份之外的唯一数值列
+        numeric = []
+        for name, col in norm.items():
+            if name in ("年份", "月份"):
+                continue
+            try:
+                if pd.to_numeric(df[col], errors="coerce").notna().any():
+                    numeric.append(col)
+            except Exception:
+                continue
+        if len(numeric) == 1:
+            return numeric[0]
+        if len(numeric) > 1:
+            raise ImportColumnAmbiguous(numeric)
+        raise ValueError(
+            "未找到旅客运输量列: 文件需包含「年份」「月份」「旅客运输量」三列; "
+            "当前列名: " + "、".join(f"「{str(c).strip()}」" for c in df.columns)
+        )
+
+    def _read_history_rows(self, df, value_column=None):
+        """解析历史数据, 返回 (rows, dropped)。
+
+        rows: 已排序去重的 [(年份, 月份, 旅客运输量)]
+        dropped: 被跳过的行说明, 便于向用户显示而非静默丢弃
+        """
+        if df is None or len(df.columns) == 0:
+            raise ValueError("Excel 文件为空或没有可用列")
+
+        norm = self._norm_column_map(df)
+        missing = [name for name in ("年份", "月份") if name not in norm]
+        if missing:
+            raise ValueError(
+                "缺少必需列: " + "、".join(f"「{m}」" for m in missing)
+                + "; 当前列名: " + "、".join(f"「{str(c).strip()}」" for c in df.columns)
+            )
+
+        year_col, month_col = norm["年份"], norm["月份"]
+        value_col = self._resolve_value_column(df, value_column=value_column)
+
+        rows, dropped, seen = [], [], set()
+        for pos, (_, row) in enumerate(df.iterrows(), start=1):
+            raw_year, raw_month, raw_value = row[year_col], row[month_col], row[value_col]
+            try:
+                year = _coerce_int(raw_year)
+                month = _coerce_int(raw_month)
+                if not (1900 <= year <= 2100):
+                    raise ValueError(f"年份超出范围({year})")
+                if not (1 <= month <= 12):
+                    raise ValueError(f"月份超出范围({month})")
+                value = _coerce_int(raw_value)
+                if value <= 0:
+                    raise ValueError(f"旅客运输量非正数({value})")
+            except Exception as exc:
+                label = "?"
+                try:
+                    label = f"{int(float(raw_year))}-{int(float(raw_month)):02d}"
+                except Exception:
+                    pass
+                dropped.append(f"第{pos}条({label}): {exc}")
+                continue
+
+            if (year, month) in seen:
+                dropped.append(f"第{pos}条({year}-{month:02d}): 月份重复, 保留先出现的一条")
+                continue
+            seen.add((year, month))
+            rows.append((year, month, value))
+
+        rows.sort(key=lambda item: (item[0], item[1]))
+        return rows, dropped
+
+    @staticmethod
+    def _frame_from_rows(rows):
+        """由已校验的 (年份, 月份, 旅客运输量) 元组构造 DataFrame, 与表格显示严格同源。"""
+        return pd.DataFrame(list(rows), columns=list(HISTORY_COLUMNS))
+
+    def _commit_history_rows(self, rows, dropped, file_label: str = ""):
+        """把已解析的行写入历史表格与 self.data（两者同源, 结构上不可能串列）。"""
+        frame = self._frame_from_rows(rows)
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+        for i, (year, month, value) in enumerate(rows):
+            tag = "odd" if i % 2 == 1 else ""
+            self.history_tree.insert('', 'end', values=(year, month, f"{value:,}"), tags=(tag,))
+
+        self.data = frame
+        self.update_stats()
+        self._auto_fit_columns(self.history_tree, ["年份", "月份", "旅客运输量"])
+
+        summary = f"成功导入 {len(rows)} 条数据"
+        if dropped:
+            summary += f", 跳过 {len(dropped)} 条"
+            logging.warning("导入跳过行: %s", "; ".join(dropped))
+        if file_label:
+            self.update_status(f"数据导入成功: {os.path.basename(file_label)}")
+        return frame, summary
+
+    def import_history_file(self, file_path: str, value_column=None):
+        """解析并导入 Excel（无 UI 弹窗依赖, 供自动化/回归复用）。"""
+        df = pd.read_excel(file_path)
+        rows, dropped = self._read_history_rows(df, value_column=value_column)
+        if not rows:
+            raise ValueError("未解析到有效数据行, 请检查年份/月份/旅客运输量列内容")
+        self._commit_history_rows(rows, dropped, file_path)
+        return len(rows), dropped
+
+    def _pick_history_columns(self, parent, df, candidates):
+        """存在多个候选列时, 让用户选择旅客运输量数据源; 返回列名或 None(取消)。"""
+        picker = tk.Toplevel(parent)
+        picker.title("选择数据列")
+        picker.configure(bg=T_COLORS["bg_window"])
+        picker.transient(parent)
+
+        tk.Label(picker, text="检测到多个可能的旅客运输量列, 请选择:",
+                 font=("微软雅黑", 11, "bold"), bg=T_COLORS["bg_window"],
+                 fg=T_COLORS["primary"]).pack(anchor="w", padx=16, pady=(14, 6))
+
+        listbox = tk.Listbox(picker, height=min(8, max(3, len(candidates))), exportselection=False)
+        for name in candidates:
+            listbox.insert(tk.END, name)
+        listbox.selection_set(0)
+        listbox.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 6))
+
+        preview = tk.Label(picker, text="", justify=tk.LEFT, anchor="w",
+                           bg=T_COLORS["bg_card"], fg=T_COLORS["text_sub"])
+        preview.pack(fill=tk.X, padx=16, pady=(0, 6))
+
+        def _update_preview(_event=None):
+            selection = listbox.curselection()
+            if not selection:
+                return
+            name = candidates[selection[0]]
+            column = next((c for c in df.columns if str(c).strip() == name), name)
+            try:
+                series = pd.to_numeric(df[column], errors="coerce").dropna()
+                sample = ", ".join(f"{v:,.0f}" for v in series.head(5))
+                preview.configure(text=f"前5个有效值: {sample}\n有效 {len(series)} 行 / 共 {len(df)} 行")
+            except Exception:
+                preview.configure(text="无法预览该列")
+
+        listbox.bind("<<ListboxSelect>>", _update_preview)
+        _update_preview()
+
+        result = {"value": None}
+
+        def _confirm():
+            selection = listbox.curselection()
+            if selection:
+                result["value"] = candidates[selection[0]]
+            picker.destroy()
+
+        button_frame = tk.Frame(picker, bg=T_COLORS["bg_window"])
+        button_frame.pack(fill=tk.X, padx=16, pady=(0, 14))
+        ttk.Button(button_frame, text="使用该列", style="Modern.TButton",
+                   command=_confirm).pack(side=tk.LEFT)
+        ttk.Button(button_frame, text="取消", style="Secondary.TButton",
+                   command=picker.destroy).pack(side=tk.LEFT, padx=8)
+
+        _apply_geometry(picker, 480, 380, parent=parent, min_w=400, min_h=300, ui_scale=self._ui_scale())
+        try:
+            picker.grab_set()
+        except Exception:
+            pass
+        self.root.wait_window(picker)
+        return result["value"]
+
     def import_data(self):
         """导入 Excel 数据（自定义弹窗：文件选择 + 格式说明 + 加载反馈）"""
         win = tk.Toplevel(self.root)
@@ -1362,8 +1698,9 @@ class FinalForecastApp:
         note_card = card_frame(win, "格式说明")
         note_card.pack(fill=tk.X, padx=16, pady=4)
         tk.Label(note_card, text="· 支持 .xlsx / .xls 文件\n"
-                                   "· 需包含三列：年份、月份、旅客运输量（或按前三列顺序）\n"
-                                   "· 旅客运输量单位为原始数据口径，导入后可在数据管理页查看",
+                                   "· 按列名匹配：年份、月份、旅客运输量（自动忽略列名首尾空格）\n"
+                                   "· 若存在多个候选数值列，会弹窗让您选择旅客运输量数据源\n"
+                                   "· 无法解析的行会被跳过并在结果中列出，不再静默丢弃",
                  justify=tk.LEFT, bg=T_COLORS["bg_card"], fg=T_COLORS["text_sub"],
                  anchor="w").pack(anchor="w", padx=8, pady=(4, 8))
 
@@ -1382,40 +1719,30 @@ class FinalForecastApp:
             try:
                 df = pd.read_excel(file_path)
 
-                # 清空表格
-                for item in self.history_tree.get_children():
-                    self.history_tree.delete(item)
+                # 先完整解析, 成功后才改动界面与 self.data(避免失败时留下空表+旧数据的错位状态)
+                try:
+                    rows, dropped = self._read_history_rows(df)
+                except ImportColumnAmbiguous as ambiguous:
+                    chosen = self._pick_history_columns(win, df, ambiguous.candidates)
+                    if not chosen:
+                        status_lbl.configure(text="已取消: 未选择旅客运输量列", fg=T_COLORS["danger"])
+                        return
+                    rows, dropped = self._read_history_rows(df, value_column=chosen)
 
-                # 添加数据到表格
-                for i, (idx, row) in enumerate(df.iterrows()):
-                    # 尝试不同的列名
-                    if '年份' in df.columns and '月份' in df.columns and '旅客运输量' in df.columns:
-                        year = int(row['年份'])
-                        month = int(row['月份'])
-                        value = int(row['旅客运输量'])
-                    elif len(df.columns) >= 3:
-                        year = int(row.iloc[0])
-                        month = int(row.iloc[1])
-                        value = int(row.iloc[2])
-                    else:
-                        raise ValueError("Excel文件格式不正确")
+                if not rows:
+                    raise ValueError("未解析到有效数据行, 请检查年份/月份/旅客运输量列内容")
 
-                    tag = "odd" if i % 2 == 1 else ""
-                    formatted_val = f"{value:,}"
-                    self.history_tree.insert('', 'end', values=(year, month, formatted_val), tags=(tag,))
-
-                # 保存数据
-                self.data = df.iloc[:, :3].copy()
-                if len(self.data.columns) == 3:
-                    self.data.columns = ['年份', '月份', '旅客运输量']
-
-                # 更新统计信息 + 列宽自动适配
-                self.update_stats()
-                self._auto_fit_columns(self.history_tree, ["年份", "月份", "旅客运输量"])
-
-                self.update_status(f"数据导入成功: {os.path.basename(file_path)}")
-                status_lbl.configure(text=f"成功导入 {len(df)} 条数据", fg=T_COLORS["success"])
-                win.after(600, win.destroy)
+                # 提交: 表格与 self.data 由同一份 rows 生成, 结构上不可能串列
+                _, summary = self._commit_history_rows(rows, dropped, file_path)
+                tip = summary
+                if dropped:
+                    tip += " | " + "；".join(dropped[:3])
+                    if len(dropped) > 3:
+                        tip += f" …共 {len(dropped)} 条"
+                status_lbl.configure(text=tip, fg=T_COLORS["success"] if not dropped else T_COLORS["danger"])
+                # 有被跳过的行时保持弹窗, 让用户能读完明细; 干净导入则自动关闭
+                if not dropped:
+                    win.after(600, win.destroy)
 
             except Exception as e:
                 logging.exception("导入失败")
@@ -1429,7 +1756,7 @@ class FinalForecastApp:
 
         # 内容自适应：先布局再按实际需求计算尺寸并居中
         win.update_idletasks()
-        _content_fit_geometry(win, self.root, 520, 360, min_w=440, min_h=300)
+        _content_fit_geometry(win, self.root, 520, 360, min_w=440, min_h=300, ui_scale=self._ui_scale())
         win.grab_set()
         self.root.wait_window(win)
 
@@ -1511,7 +1838,7 @@ class FinalForecastApp:
 
         # 内容自适应：先布局再按实际需求计算尺寸并居中
         input_window.update_idletasks()
-        _content_fit_geometry(input_window, self.root, 440, 380, min_w=360, min_h=280)
+        _content_fit_geometry(input_window, self.root, 440, 380, min_w=360, min_h=280, ui_scale=self._ui_scale())
 
     def save_config(self):
         """保存配置"""
@@ -1534,7 +1861,14 @@ class FinalForecastApp:
                 self.holiday_cfg["spring_travel_months"] = [m for m, v in self.spring_month_vars.items() if bool(v.get())]
 
             growth_rate = float(self.config_vars["annual_growth_rate"].get()) / 100.0
+            if growth_rate <= -0.95:
+                raise ValueError("年度环比增长率不能低于 -95%（否则年度总量目标会归零或转负）")
             self.growth_cfg["annual_growth_rate"] = growth_rate
+            if hasattr(self, "growth_apply_var"):
+                self.growth_cfg["apply_annual_growth"] = bool(self.growth_apply_var.get())
+            ui_targets = self._yoy_targets_from_ui()
+            if ui_targets:
+                self.growth_cfg["yoy_targets"] = ui_targets
 
             if hasattr(self, "hw_weight_var"):
                 self.model_cfg.setdefault("weights", {})
@@ -1542,8 +1876,8 @@ class FinalForecastApp:
                 self.model_cfg["weights"]["sarima"] = float(self.sarima_weight_var.get())
                 self.model_cfg["weights"].pop("linear", None)
 
-            if hasattr(self, "weight_mode_var"):
-                self.model_cfg["weight_mode"] = str(self.weight_mode_var.get())
+            if hasattr(self, "model_mode_var"):
+                self.model_cfg["model_mode"] = str(self.model_mode_var.get())
             if hasattr(self, "engine_var"):
                 self.model_cfg["engine"] = str(self.engine_var.get())
             if hasattr(self, "sarima_auto_var"):
@@ -1558,15 +1892,7 @@ class FinalForecastApp:
             self.profile["model"] = self.model_cfg
             self.profile["spring_festival_dates"] = self.spring_festival_dates
 
-            self.lunar_config["spring_festival_effect"] = float(self.holiday_cfg.get("spring_festival_effect", self.lunar_config["spring_festival_effect"]))
-            self.lunar_config["summer_vacation_effect"] = float(self.holiday_cfg.get("summer_vacation_effect", self.lunar_config["summer_vacation_effect"]))
-            self.lunar_config["may_day_effect"] = float(self.holiday_cfg.get("may_day_effect", self.lunar_config["may_day_effect"]))
-            self.lunar_config["national_day_effect"] = float(self.holiday_cfg.get("national_day_effect", self.lunar_config["national_day_effect"]))
-            self.lunar_config["winter_peak_effect"] = float(self.holiday_cfg.get("winter_peak_effect", self.lunar_config["winter_peak_effect"]))
-            self.lunar_config["annual_growth_rate"] = float(self.growth_cfg.get("annual_growth_rate", self.lunar_config["annual_growth_rate"]))
-            self.lunar_config["spring_travel_before_days"] = int(self.holiday_cfg.get("spring_travel_before_days", self.lunar_config.get("spring_travel_before_days", 15)))
-            self.lunar_config["spring_travel_after_days"] = int(self.holiday_cfg.get("spring_travel_after_days", self.lunar_config.get("spring_travel_after_days", 24)))
-
+            self._sync_lunar_config()
             self.config_store.upsert_profile(self.active_profile_name, self.profile)
             self.config_store.set_active_profile(self.active_profile_name)
             ok, info = self.config_store.save(self.config_store.load())
@@ -1593,6 +1919,24 @@ class FinalForecastApp:
         if hasattr(self, "spring_month_vars"):
             for m, v in self.spring_month_vars.items():
                 v.set(m in [1, 2, 3])
+        # 一并复位此前遗漏的模型/引擎/增长率开关, 否则"重置默认"形同虚设
+        if hasattr(self, "growth_apply_var"):
+            self.growth_apply_var.set(False)
+        if hasattr(self, "model_mode_var"):
+            self.model_mode_var.set("auto")
+        if hasattr(self, "engine_var"):
+            self.engine_var.set("intervention")
+        if hasattr(self, "hw_weight_var"):
+            self.hw_weight_var.set(0.4)
+            self.sarima_weight_var.set(0.4)
+            if hasattr(self, "kalman_weight_var"):
+                self.kalman_weight_var.set(0.2)
+        if hasattr(self, "sarima_auto_var"):
+            self.sarima_auto_var.set(False)
+        if hasattr(self, "hw_auto_var"):
+            self.hw_auto_var.set(False)
+        if hasattr(self, "kalman_auto_var"):
+            self.kalman_auto_var.set(False)
 
         messagebox.showinfo("成功", "配置参数已重置为默认值")
 
@@ -1674,6 +2018,49 @@ class FinalForecastApp:
         except Exception as e:
             messagebox.showerror("错误", str(e))
 
+    def _sync_lunar_config(self) -> None:
+        """把 holiday/growth 配置同步到 legacy 的 lunar_config（传统管线、导出与说明文字使用）。"""
+        try:
+            self.lunar_config["spring_festival_effect"] = float(self.holiday_cfg.get("spring_festival_effect", self.lunar_config["spring_festival_effect"]))
+            self.lunar_config["summer_vacation_effect"] = float(self.holiday_cfg.get("summer_vacation_effect", self.lunar_config["summer_vacation_effect"]))
+            self.lunar_config["may_day_effect"] = float(self.holiday_cfg.get("may_day_effect", self.lunar_config["may_day_effect"]))
+            self.lunar_config["national_day_effect"] = float(self.holiday_cfg.get("national_day_effect", self.lunar_config["national_day_effect"]))
+            self.lunar_config["winter_peak_effect"] = float(self.holiday_cfg.get("winter_peak_effect", self.lunar_config["winter_peak_effect"]))
+            self.lunar_config["annual_growth_rate"] = float(self.growth_cfg.get("annual_growth_rate", self.lunar_config["annual_growth_rate"]))
+            self.lunar_config["spring_travel_before_days"] = int(self.holiday_cfg.get("spring_travel_before_days", self.lunar_config.get("spring_travel_before_days", 15)))
+            self.lunar_config["spring_travel_after_days"] = int(self.holiday_cfg.get("spring_travel_after_days", self.lunar_config.get("spring_travel_after_days", 24)))
+        except Exception:
+            pass
+
+    def _sync_config_from_ui(self) -> bool:
+        """预测前把配置页当前输入同步进内存配置，并返回是否成功。
+
+        缺陷背景: 此前只有点"保存配置"才会把 config_vars / 春运天数等写回
+        self.holiday_cfg / self.growth_cfg, 而 run_forecast 直接读这些内存快照。
+        结果就是"配置页怎么调，预测结果都不变"。这里在每次预测/回测前强制同步。
+        """
+        if not hasattr(self, "config_vars") or "annual_growth_rate" not in self.config_vars:
+            return False
+        try:
+            profile = self.collect_profile_from_ui()
+        except Exception as exc:
+            logging.warning("配置同步失败, 沿用上次配置: %s", exc)
+            return False
+        try:
+            self.profile = dict(profile)
+            self.holiday_cfg = dict(profile.get("holiday", {}) or {})
+            self.growth_cfg = dict(profile.get("growth", {}) or {})
+            self.model_cfg = dict(profile.get("model", {}) or {})
+            dates = profile.get("spring_festival_dates")
+            if isinstance(dates, dict) and dates:
+                self.spring_festival_dates = dict(dates)
+            self._sync_lunar_config()
+            self._renumber_yoy_rows()
+            return True
+        except Exception as exc:
+            logging.warning("配置同步应用失败: %s", exc)
+            return False
+
     def collect_profile_from_ui(self):
         holiday_cfg = dict(self.holiday_cfg)
         growth_cfg = dict(self.growth_cfg)
@@ -1691,9 +2078,16 @@ class FinalForecastApp:
         holiday_cfg["spring_travel_months"] = [m for m, v in self.spring_month_vars.items() if bool(v.get())] if hasattr(self, "spring_month_vars") else holiday_cfg.get("spring_travel_months", [1, 2, 3])
 
         growth_cfg["annual_growth_rate"] = float(self.config_vars["annual_growth_rate"].get()) / 100.0
+        if growth_cfg["annual_growth_rate"] <= -0.95:
+            raise ValueError("年度环比增长率不能低于 -95%")
+        if hasattr(self, "growth_apply_var"):
+            growth_cfg["apply_annual_growth"] = bool(self.growth_apply_var.get())
+        ui_targets = self._yoy_targets_from_ui()
+        if ui_targets:
+            growth_cfg["yoy_targets"] = ui_targets
 
-        if hasattr(self, "weight_mode_var"):
-            model_cfg["weight_mode"] = str(self.weight_mode_var.get())
+        if hasattr(self, "model_mode_var"):
+            model_cfg["model_mode"] = str(self.model_mode_var.get())
         if hasattr(self, "engine_var"):
             model_cfg["engine"] = str(self.engine_var.get())
         model_cfg.setdefault("weights", {})
@@ -1744,6 +2138,10 @@ class FinalForecastApp:
             if "annual_growth_rate" in self.config_vars:
                 self.config_vars["annual_growth_rate"].set(float(self.growth_cfg.get("annual_growth_rate", 0.027)) * 100)
 
+        if hasattr(self, "growth_apply_var"):
+            self.growth_apply_var.set(bool(self.growth_cfg.get("apply_annual_growth", False)))
+        self._load_yoy_targets_to_ui()
+
         if hasattr(self, "spring_before_var"):
             self.spring_before_var.set(int(self.holiday_cfg.get("spring_travel_before_days", 15)))
         if hasattr(self, "spring_after_var"):
@@ -1763,9 +2161,9 @@ class FinalForecastApp:
             if hasattr(self, "kalman_weight_var"):
                 self.kalman_weight_var.set(float(weights.get("kalman", 0.2)))
 
-        if hasattr(self, "weight_mode_var"):
-            wm = self.model_cfg.get("weight_mode", "auto")
-            self.weight_mode_var.set(wm if wm in ["manual", "auto"] else "auto")
+        if hasattr(self, "model_mode_var"):
+            mm = str(self.model_cfg.get("model_mode", "auto") or "auto")
+            self.model_mode_var.set(mm if mm in ("manual", "auto") else "auto")
 
         if hasattr(self, "engine_var"):
             eng = self.model_cfg.get("engine", "intervention")
@@ -1796,7 +2194,8 @@ class FinalForecastApp:
 
             win = tk.Toplevel(self.root)
             win.title("春运时间预览")
-            _apply_geometry(win, 900, 520, parent=self.root, min_w=640, min_h=400)
+            _apply_geometry(win, 900, 520, parent=self.root, min_w=640, min_h=400,
+                            ui_scale=self._ui_scale(), ratio_w=0.52, ratio_h=0.58)
 
             top = tk.Frame(win)
             top.pack(fill=tk.X, padx=10, pady=10)
@@ -1813,8 +2212,7 @@ class FinalForecastApp:
             ax.set_title("各月春运天数分配")
             ax.grid(True, axis="y", alpha=0.3)
 
-            canvas = FigureCanvasTkAgg(fig, master=win)
-            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            canvas = _embed_figure_canvas(win, fig, min_height=320, padx=10, pady=10)
             canvas.draw()
         except Exception as e:
             messagebox.showerror("错误", str(e))
@@ -1892,7 +2290,7 @@ class FinalForecastApp:
         return float(compute_holiday_effect(int(year), int(month), temp_cfg, self.spring_festival_dates))
 
     def apply_annual_growth_adjustment(self, forecast: pd.Series) -> pd.Series:
-        annual_growth_rate = float(self.growth_cfg.get("annual_growth_rate", self.lunar_config.get("annual_growth_rate", 0.027)))
+        """按年度同比目标表校准（多年复利）；无目标表时回退单年增长率。"""
         historical_yearly_total = None
         if self.data is not None and len(self.data) > 0:
             last_year = int(self.data["年份"].max())
@@ -1901,37 +2299,78 @@ class FinalForecastApp:
                 historical_yearly_total = float(last_year_data["旅客运输量"].sum())
             elif len(last_year_data) > 0:
                 historical_yearly_total = float(last_year_data["旅客运输量"].mean() * 12)
-        adjusted, growth_rates = apply_annual_growth_adjustment(forecast, annual_growth_rate, historical_yearly_total)
-        self.growth_rates = growth_rates
+        targets = self._yoy_targets_map()
+        adjusted, info = apply_yoy_targets(forecast, targets, historical_yearly_total)
+        self.yoy_target_info = info
+        self.growth_rates = {y: float(v.get("adjust_pct", 0.0)) for y, v in info.items()}
         return adjusted
 
     def prepare_time_series(self):
-        """准备时间序列数据"""
-        # 创建日期索引
+        """准备时间序列数据（解析失败的行显式记录, 不再静默 continue 造成长度错位）"""
         dates = []
         values = []
+        seen = set()
+        dropped = []
 
-        for _, row in self.data.iterrows():
-            year = int(row['年份'])
-            month = int(row['月份'])
-
+        for pos, (_, row) in enumerate(self.data.iterrows(), start=1):
+            # 先全部解析成功, 再成对 append: dates/values 长度永远一致
             try:
+                year = int(row['年份'])
+                month = int(row['月份'])
                 date_obj = datetime(year, month, 1)
                 date_str = date_obj.strftime('%Y-%m-%d')
-                if date_str not in dates:
-                    dates.append(date_str)
-                    values.append(int(row['旅客运输量']))
+                value = int(row['旅客运输量'])
             except Exception as e:
-                print(f"创建日期错误: {e}")
+                dropped.append(f"第{pos}条({row.get('年份')}-{row.get('月份')}): {e}")
                 continue
+
+            if date_str in seen:
+                dropped.append(f"第{pos}条({year}-{month:02d}): 月份重复")
+                continue
+            seen.add(date_str)
+            dates.append(date_str)
+            values.append(value)
+
+        if dropped:
+            logging.warning("时间序列跳过行: %s", "; ".join(dropped))
 
         # 创建时间序列
         if dates:
             ts = pd.Series(values, index=pd.to_datetime(dates))
             ts = ts.sort_index()
+            if dropped and len(ts) < 12:
+                detail = "; ".join(dropped[:5])
+                raise ValueError(
+                    f"有效数据仅 {len(ts)} 个月（需 ≥12），{len(dropped)} 条数据无法解析: {detail}"
+                )
             return ts
         else:
             raise ValueError("无法创建时间序列，日期数据无效")
+
+    def _model_display_name(self, model_type=None) -> str:
+        """模型键 -> 中文显示名; 默认使用实际参与的模型(而非单选钮)。"""
+        key = model_type or getattr(self, "last_used_model", None) or str(self.model_var.get())
+        return {
+            "ensemble": "融合模型",
+            "hw": "Holt-Winters",
+            "sarima": "SARIMA",
+            "kalman": "卡尔曼滤波",
+        }.get(str(key), str(key))
+
+    def _on_model_radio(self, value: str):
+        """用户主动点选模型 => 立即转为手动模式, 预测严格按该模型执行。"""
+        self.model_var.set(value)
+        self.model_mode_var.set("manual")
+        name = {"ensemble": "融合模型", "hw": "Holt-Winters", "sarima": "SARIMA", "kalman": "卡尔曼滤波"}.get(value, value)
+        self.update_status(f"已切换为手动模式: {name}（重新勾选“自动推荐”可恢复回测推荐）")
+
+    def _on_mode_toggle(self):
+        """自动推荐开关切换时给出明确反馈。"""
+        mode = str(self.model_mode_var.get() or "auto")
+        if mode == "manual":
+            self.update_status("已切换为手动模式: 预测将严格使用当前所选模型")
+        else:
+            self.update_status("已开启自动推荐: 按回测结果选择模型与权重，单选钮会同步刷新")
 
     def run_forecast(self):
         """执行预测（自动推荐 / 手动选择双模式，支持外部因子）"""
@@ -1942,6 +2381,9 @@ class FinalForecastApp:
         try:
             self.update_status("正在计算预测...")
 
+            # 关键: 把配置页当前输入同步进内存配置（否则改了配置不保存, 预测仍用旧值）
+            self._sync_config_from_ui()
+
             # 准备时间序列
             ts = self.prepare_time_series()
 
@@ -1949,7 +2391,7 @@ class FinalForecastApp:
             factors = None
             if self.external_enabled:
                 try:
-                    factors = self.external_mgr.get_monthly_factors(ts.index, periods=12)
+                    factors = self.external_mgr.get_monthly_factors(ts.index, periods=self.forecast_periods())
                 except Exception:
                     factors = None
 
@@ -1957,6 +2399,7 @@ class FinalForecastApp:
             mode = str(getattr(self, "model_mode_var", tk.StringVar(value="auto")).get() or "auto")
             model_type = str(self.model_var.get())
             rec_info = None
+            auto_skip_note = ""
 
             if mode == "auto":
                 try:
@@ -1967,12 +2410,15 @@ class FinalForecastApp:
                         rec = bt.get("recommendation") or {}
                         model_type = str(rec.get("model", "ensemble"))
                         weights = rec.get("weights") or recommend_weights_from_backtest(bt)
-                        self.hw_weight_var.set(round(float(weights.get("hw", 0.5)), 4))
-                        self.sarima_weight_var.set(round(float(weights.get("sarima", 0.5)), 4))
-                        if hasattr(self, "kalman_weight_var") and "kalman" in weights:
+                        # 同步 UI（StringVar.set 不触发 command, 不会反向切回 manual）
+                        self.model_var.set(model_type)
+                        # 子集选择可能把某成员权重设为 0（被淘汰），这里必须同步归零
+                        self.hw_weight_var.set(round(float(weights.get("hw", 0.0)), 4))
+                        self.sarima_weight_var.set(round(float(weights.get("sarima", 0.0)), 4))
+                        if hasattr(self, "kalman_weight_var"):
                             self.kalman_weight_var.set(round(float(weights.get("kalman", 0.0)), 4))
-                        self.model_cfg.setdefault("weights", {})
-                        self.model_cfg["weights"].update({k: float(v) for k, v in weights.items()})
+                        # 注意: 不写入 self.model_cfg["weights"]。否则一次自动推荐会被保存成
+                        # 手动默认权重, 让"手动模式严格生效"变成假的。BMA 结果只留在 last_rec_info。
                         rec_info = {
                             "model": model_type,
                             "weights": {k: round(float(v), 4) for k, v in weights.items()},
@@ -1980,9 +2426,20 @@ class FinalForecastApp:
                             "summary": bt.get("summary", {}),
                         }
                     else:
-                        model_type = "ensemble"
-                except Exception:
-                    model_type = "ensemble"
+                        # 回测无法进行（通常是历史数据不足 min_train+horizon=36 个月）:
+                        # 不再静默强制退回融合模型, 而是尊重当前单选并明确告知。
+                        reason = str(bt.get("error", "回测失败"))
+                        need = bt.get("min_required")
+                        auto_skip_note = reason + (f"（需 ≥{int(need)} 个月）" if need else "")
+                except Exception as exc:
+                    logging.exception("自动推荐失败")
+                    auto_skip_note = f"回测异常: {exc}"
+
+            # 记录实际使用的模型, 供图表标题与导出封面使用（不再读单选钮, 避免标题与实际不符）
+            self.last_used_model = model_type
+            self.auto_skip_note = auto_skip_note
+            if auto_skip_note:
+                logging.warning("自动推荐已跳过: %s", auto_skip_note)
 
             # 每次预测前清空置信带（由 SARIMA 路径填充）
             self.model_conf_int = None
@@ -2009,8 +2466,18 @@ class FinalForecastApp:
 
             if use_intervention:
                 # 干预引擎: 节假日/COVID 已在 exog 建模, 无乘法后处理;
-                # 增长率改为合理性告警不强制覆盖 (回测实证: 强制覆盖为最大失真源)
-                self.apply_growth_sanity_check(forecast)
+                # 增长率默认只做合理性告警 (回测实证: 强制覆盖为最大失真源),
+                # 仅在用户显式勾选"强制校准"时才按设定增长率重定年度总量。
+                apply_growth = bool(self.growth_apply_var.get()) if hasattr(self, "growth_apply_var") \
+                    else bool(self.growth_cfg.get("apply_annual_growth", False))
+                if apply_growth:
+                    forecast = self.apply_annual_growth_adjustment(forecast)
+                    # 校准后已达标, 再跑一次校验基本不会再弹偏离告警
+                    self.apply_growth_sanity_check(forecast)
+                    self.growth_calibrated = True
+                else:
+                    forecast = self.apply_growth_sanity_check(forecast)
+                    self.growth_calibrated = False
             else:
                 # 应用农历假日效应
                 forecast = self.apply_lunar_holiday_effects(forecast)
@@ -2028,6 +2495,22 @@ class FinalForecastApp:
                 self.update_status(f"预测完成（自动推荐：{rec_info['model']}，权重方法：{rec_info['method']}）")
             else:
                 self.update_status("预测完成")
+            if getattr(self, "growth_calibrated", False):
+                info = getattr(self, "yoy_target_info", {}) or {}
+                if info:
+                    detail = "，".join(
+                        f"{y}年同比{info[y].get('target_rate', 0) * 100:+.2f}%→{info[y].get('target_total', 0):,.0f}"
+                        for y in sorted(info)
+                    )
+                    self.update_status(f"预测完成（已按同比目标校准：{detail}）")
+                else:
+                    rate_pct = self._current_growth_rate() * 100
+                    self.update_status(f"预测完成（已按设定增长率 {rate_pct:.2f}% 强制校准年度总量）")
+            if getattr(self, "auto_skip_note", ""):
+                self.update_status(
+                    f"预测完成（自动推荐已跳过：{self.auto_skip_note}；"
+                    f"已按当前选择使用{self._model_display_name()}）"
+                )
 
         except Exception as e:
             logging.exception("预测失败")
@@ -2044,17 +2527,19 @@ class FinalForecastApp:
             factors = None
             if self.external_enabled:
                 try:
-                    factors = self.external_mgr.get_monthly_factors(ts.index, periods=12)
+                    factors = self.external_mgr.get_monthly_factors(ts.index, periods=self.forecast_periods())
                 except Exception:
                     factors = None
 
+            # 与 run_forecast 保持一致: 回测也应采用当前 UI 参数, 而不是启动时的 profile 快照
+            self._sync_config_from_ui()
             profile = dict(self.profile)
             holiday_cfg = dict(profile.get("holiday", {}))
             growth_cfg = dict(profile.get("growth", {}))
             model_cfg = dict(profile.get("model", {}))
 
             holiday_cfg["enabled"] = bool(self.holiday_var.get()) if hasattr(self, "holiday_var") else bool(holiday_cfg.get("enabled", True))
-            growth_cfg["annual_growth_rate"] = float(self.growth_cfg.get("annual_growth_rate", self.lunar_config.get("annual_growth_rate", 0.027)))
+            growth_cfg["annual_growth_rate"] = self._current_growth_rate()
 
             model_cfg.setdefault("holt_winters", {})
             model_cfg["holt_winters"]["auto_tune"] = bool(self.hw_auto_var.get()) if hasattr(self, "hw_auto_var") else bool(model_cfg.get("holt_winters", {}).get("auto_tune", False))
@@ -2109,14 +2594,18 @@ class FinalForecastApp:
             messagebox.showerror("回测失败", str(e))
 
     def _active_members(self):
-        """当前参与回测/融合的成员列表（卡尔曼权重 > 0 时纳入）"""
-        members = ["hw", "sarima"]
-        try:
-            if hasattr(self, "kalman_weight_var") and float(self.kalman_weight_var.get()) > 0:
-                members.append("kalman")
-        except Exception:
-            pass
-        return members
+        """当前参与回测/融合的成员列表：权重为 0 的成员视为被淘汰。"""
+        def _weight(name: str) -> float:
+            var = getattr(self, f"{name}_weight_var", None)
+            try:
+                return float(var.get()) if var is not None else 0.0
+            except Exception:
+                return 0.0
+
+        members = [name for name in ("hw", "sarima") if _weight(name) > 0]
+        if _weight("kalman") > 0:
+            members.append("kalman")
+        return members or ["hw"]
 
     def _prepare_exog(self, ts, factors, periods: int = 12):
         """将月度因子拆分为训练期与预测期外生变量（与 SARIMAX 对齐）"""
@@ -2173,7 +2662,7 @@ class FinalForecastApp:
 
         hw = holt_winters_forecast(
             ts,
-            periods=12,
+            periods=self.forecast_periods(),
             trend=hw_cfg.get("trend", "add"),
             seasonal=hw_cfg.get("seasonal", "add"),
             seasonal_periods=int(hw_cfg.get("seasonal_periods", 12)),
@@ -2181,7 +2670,7 @@ class FinalForecastApp:
         )
         sar = sarimax_intervention_forecast(
             ts,
-            periods=12,
+            periods=self.forecast_periods(),
             spring_festival_dates=dict(self.spring_festival_dates),
             holiday_cfg=dict(self.holiday_cfg),
             include_covid=True,
@@ -2193,7 +2682,7 @@ class FinalForecastApp:
         if weights.get("kalman", 0.0) > 0:
             kal = kalman_intervention_forecast(
                 ts,
-                periods=12,
+                periods=self.forecast_periods(),
                 spring_festival_dates=dict(self.spring_festival_dates),
                 holiday_cfg=dict(self.holiday_cfg),
                 include_covid=True,
@@ -2230,7 +2719,7 @@ class FinalForecastApp:
         exog_full = self._prepare_exog_full(ts, factors)
         out = sarimax_intervention_forecast(
             ts,
-            periods=12,
+            periods=self.forecast_periods(),
             spring_festival_dates=dict(self.spring_festival_dates),
             holiday_cfg=dict(self.holiday_cfg),
             include_covid=True,
@@ -2241,9 +2730,188 @@ class FinalForecastApp:
         self.model_conf_int = out.meta.get("conf_int")
         return out.forecast
 
+    def _yoy_targets_map(self) -> Dict[int, float]:
+        """当前生效的年度同比目标 {年份: 小数}；目标表为空时回退单年 annual_growth_rate。"""
+        targets = normalize_yoy_targets(self.growth_cfg.get("yoy_targets"))
+        if targets:
+            return {y: targets[y] for y in sorted(targets)[:3]}
+        last_year = None
+        if self.data is not None and len(self.data):
+            try:
+                last_year = int(self.data["年份"].max())
+            except Exception:
+                last_year = None
+        year = (last_year + 1) if last_year else (datetime.now().year + 1)
+        return {year: self._current_growth_rate()}
+
+    def _first_forecast_year(self) -> int:
+        last = None
+        if self.data is not None and len(self.data):
+            try:
+                last = int(self.data["年份"].max())
+            except Exception:
+                last = None
+        return (last + 1) if last else (datetime.now().year + 1)
+
+    def _on_growth_rate_changed(self, *_args):
+        """增长率输入框与单行目标表保持同步（多行时只影响新增行）。"""
+        tree = getattr(self, "yoy_tree", None)
+        if tree is None:
+            return
+        children = tree.get_children()
+        if len(children) != 1:
+            return
+        try:
+            rate = float(self.config_vars["annual_growth_rate"].get())
+        except Exception:
+            return
+        item = children[0]
+        year = tree.item(item, "values")[0]
+        tree.item(item, values=(year, f"{rate:.2f}"))
+
+    def _yoy_targets_from_ui(self):
+        """从配置页同比目标表读取 [{year, rate}]；控件不存在时返回 None。"""
+        tree = getattr(self, "yoy_tree", None)
+        if tree is None:
+            return None
+        rates = []
+        for item in tree.get_children():
+            values = tree.item(item, "values")
+            try:
+                rates.append(float(values[1]) / 100.0)
+            except Exception:
+                continue
+        if not rates:
+            return None
+        # 年份按"历史末年+1"起连续对齐，避免表里的年份与实际预测年份错位导致同比静默失效
+        start = self._first_forecast_year()
+        return [{"year": start + i, "rate": r} for i, r in enumerate(rates)]
+
+    def forecast_years(self) -> List[int]:
+        return sorted(self._yoy_targets_map().keys())[:3]
+
+    def forecast_periods(self) -> int:
+        """预测跨度（月）= 12 × 目标表行数，1-3 年。"""
+        return max(12, 12 * len(self.forecast_years()))
+
+    def _next_yoy_year(self) -> int:
+        years = []
+        tree = getattr(self, "yoy_tree", None)
+        if tree is not None:
+            for item in tree.get_children():
+                try:
+                    years.append(int(tree.item(item, "values")[0]))
+                except Exception:
+                    continue
+        if years:
+            return max(years) + 1
+        last = None
+        if self.data is not None and len(self.data):
+            try:
+                last = int(self.data["年份"].max())
+            except Exception:
+                last = None
+        return (last or datetime.now().year) + 1
+
+    def _renumber_yoy_rows(self):
+        """把目标表年份重排为"历史末年+1"起的连续年份，避免重复或错位年份。"""
+        tree = getattr(self, "yoy_tree", None)
+        if tree is None:
+            return
+        start = self._first_forecast_year()
+        for index, item in enumerate(tree.get_children()):
+            values = tree.item(item, "values")
+            rate = values[1] if len(values) > 1 else "0.00"
+            tree.item(item, values=(start + index, rate))
+
+    def _add_yoy_row(self, year=None, rate_pct=None):
+        if not hasattr(self, "yoy_tree"):
+            return
+        if len(self.yoy_tree.get_children()) >= 3:
+            messagebox.showinfo("提示", "最多支持 3 年预测跨度")
+            return
+        y = year if year is not None else self._next_yoy_year()
+        try:
+            r = float(rate_pct) if rate_pct is not None else float(self.config_vars["annual_growth_rate"].get())
+        except Exception:
+            r = 2.7
+        self.yoy_tree.insert("", "end", values=(y, f"{r:.2f}"))
+        self._renumber_yoy_rows()
+
+    def _delete_yoy_row(self):
+        if not hasattr(self, "yoy_tree"):
+            return
+        selection = self.yoy_tree.selection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选中要删除的行")
+            return
+        if len(self.yoy_tree.get_children()) <= 1:
+            messagebox.showinfo("提示", "至少保留一行（1 年预测）")
+            return
+        for item in selection:
+            self.yoy_tree.delete(item)
+        self._renumber_yoy_rows()
+
+    def _edit_yoy_row(self):
+        if not hasattr(self, "yoy_tree"):
+            return
+        selection = self.yoy_tree.selection()
+        if not selection:
+            return
+        item = selection[0]
+        values = self.yoy_tree.item(item, "values")
+        try:
+            initial = float(values[1])
+            year = int(values[0])
+        except Exception:
+            return
+        new_rate = simpledialog.askfloat(
+            "编辑同比", f"{year} 年同比（%）:", initialvalue=initial,
+            minvalue=-95.0, maxvalue=300.0, parent=self.root,
+        )
+        if new_rate is not None:
+            self.yoy_tree.item(item, values=(year, f"{float(new_rate):.2f}"))
+
+    def _load_yoy_targets_to_ui(self):
+        tree = getattr(self, "yoy_tree", None)
+        if tree is None:
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        targets = normalize_yoy_targets(self.growth_cfg.get("yoy_targets"))
+        if targets:
+            start = self._first_forecast_year()
+            for i, year in enumerate(sorted(targets)[:3]):
+                tree.insert("", "end", values=(start + i, f"{targets[year] * 100:.2f}"))
+            return
+        last = None
+        if self.data is not None and len(self.data):
+            try:
+                last = int(self.data["年份"].max())
+            except Exception:
+                last = None
+        year = (last or datetime.now().year) + 1
+        try:
+            rate = float(self.config_vars["annual_growth_rate"].get())
+        except Exception:
+            rate = float(self.growth_cfg.get("annual_growth_rate", 0.027)) * 100
+        tree.insert("", "end", values=(year, f"{rate:.2f}"))
+
+    def _current_growth_rate(self) -> float:
+        """实时读取当前年度环比增长率（小数）。
+
+        优先取配置页输入框的值：用户改完数字后不点“保存配置”直接点“运行预测”时,
+        self.growth_cfg 仍是旧值（V1.4 缺陷：改了负数结果不变的另一半原因）。
+        """
+        try:
+            if hasattr(self, "config_vars") and "annual_growth_rate" in self.config_vars:
+                return float(self.config_vars["annual_growth_rate"].get()) / 100.0
+        except Exception:
+            pass
+        return float(self.growth_cfg.get("annual_growth_rate", self.lunar_config.get("annual_growth_rate", 0.027)))
+
     def apply_growth_sanity_check(self, forecast):
         """增长率合理性告警: 不修改预测值, 偏离设定增长率时提示业务判断"""
-        annual_growth_rate = float(self.growth_cfg.get("annual_growth_rate", self.lunar_config.get("annual_growth_rate", 0.027)))
         historical_yearly_total = None
         if self.data is not None and len(self.data) > 0:
             last_year = int(self.data["年份"].max())
@@ -2252,7 +2920,7 @@ class FinalForecastApp:
                 historical_yearly_total = float(last_year_data["旅客运输量"].sum())
             elif len(last_year_data) > 0:
                 historical_yearly_total = float(last_year_data["旅客运输量"].mean() * 12)
-        unchanged, warnings_info = growth_sanity_check(forecast, annual_growth_rate, historical_yearly_total)
+        unchanged, warnings_info = growth_sanity_check_targets(forecast, self._yoy_targets_map(), historical_yearly_total)
         self.growth_warnings = warnings_info
         alerts = {y: info for y, info in warnings_info.items() if info.get("level") != "ok"}
         if alerts:
@@ -2285,7 +2953,7 @@ class FinalForecastApp:
             sarima_params={"order": sarima_cfg.get("order", [1, 1, 1]), "seasonal_order": sarima_cfg.get("seasonal_order", [1, 1, 1, 12])},
             hw_params={"trend": hw_cfg.get("trend", "add"), "seasonal": hw_cfg.get("seasonal", "add"), "seasonal_periods": hw_cfg.get("seasonal_periods", 12)},
             kalman_params={"auto_tune": bool(self.kalman_auto_var.get()) if hasattr(self, "kalman_auto_var") else bool(kalman_cfg.get("auto_tune", False))},
-            periods=12,
+            periods=self.forecast_periods(),
             exog=exog_train,
             exog_future=exog_future,
         )
@@ -2303,13 +2971,23 @@ class FinalForecastApp:
         hw_cfg = self.model_cfg.get("holt_winters", {}) if isinstance(self.model_cfg.get("holt_winters", {}), dict) else {}
         out = holt_winters_forecast(
             ts,
-            periods=12,
+            periods=self.forecast_periods(),
             trend=hw_cfg.get("trend", "add"),
             seasonal=hw_cfg.get("seasonal", "add"),
             seasonal_periods=int(hw_cfg.get("seasonal_periods", 12)),
             auto_tune=bool(self.hw_auto_var.get()) if hasattr(self, "hw_auto_var") else bool(hw_cfg.get("auto_tune", False)),
         )
         self.model_conf_int = None  # HW 无置信区间
+        # HW 没有节假日外生变量, 干预引擎下按配置效应系数做乘法修正,
+        # 保证"修改效应系数 -> 预测结果变化"对所有模型都成立
+        engine = str(getattr(self, "engine_var", tk.StringVar(value="intervention")).get() or "intervention")
+        if engine == "intervention":
+            try:
+                from capm.holiday import apply_configured_holiday_effects
+
+                return apply_configured_holiday_effects(out.forecast, self.holiday_cfg, self.spring_festival_dates)
+            except Exception:
+                pass
         return out.forecast
 
     def sarima_forecast(self, ts, factors=None):
@@ -2317,7 +2995,7 @@ class FinalForecastApp:
         exog_train, exog_future = self._prepare_exog(ts, factors)
         out = sarima_forecast(
             ts,
-            periods=12,
+            periods=self.forecast_periods(),
             order=tuple(sarima_cfg.get("order", (1, 1, 1))),
             seasonal_order=tuple(sarima_cfg.get("seasonal_order", (1, 1, 1, 12))),
             auto_tune=bool(self.sarima_auto_var.get()) if hasattr(self, "sarima_auto_var") else bool(sarima_cfg.get("auto_tune", False)),
@@ -2333,7 +3011,7 @@ class FinalForecastApp:
         exog_full = self._prepare_exog_full(ts, factors)
         out = kalman_intervention_forecast(
             ts,
-            periods=12,
+            periods=self.forecast_periods(),
             spring_festival_dates=dict(self.spring_festival_dates),
             holiday_cfg=dict(self.holiday_cfg),
             include_covid=True,
@@ -2349,7 +3027,7 @@ class FinalForecastApp:
         exog_train, exog_future = self._prepare_exog(ts, factors)
         out = kalman_forecast(
             ts,
-            periods=12,
+            periods=self.forecast_periods(),
             exog=exog_train,
             exog_future=exog_future,
             auto_tune=bool(self.kalman_auto_var.get()) if hasattr(self, "kalman_auto_var") else bool(kalman_cfg.get("auto_tune", False)),
@@ -2358,7 +3036,7 @@ class FinalForecastApp:
         return out.forecast
 
     def simple_seasonal_forecast(self, ts):
-        return simple_seasonal_forecast(ts, periods=12)
+        return simple_seasonal_forecast(ts, periods=self.forecast_periods())
 
     def apply_lunar_holiday_effects(self, forecast):
         """应用农历假日效应"""
@@ -2387,6 +3065,40 @@ class FinalForecastApp:
         })
 
         yearly_totals = forecast_df.groupby('year')['value'].sum()
+
+        # 展示用春运天数: 干预引擎不走 apply_lunar_holiday_effects, spring_festival_info 不会被填充。
+        # 这里按农历春节日期补算展示值(仅影响表格/图表星标/导出, 不参与算法计算)。
+        existing_spring = getattr(self, "spring_festival_info", {}) or {}
+        spring_info = {}
+        for date in forecast.index:
+            key = f"{date.year}-{date.month:02d}"
+            info = dict(existing_spring.get(key) or {})
+            info.setdefault("春运天数", self.calculate_spring_festival_days(date.year, date.month))
+            spring_info[key] = info
+        self.spring_festival_info = spring_info
+
+        # 年度增长率(展示口径): 预测年总量相对上一年总量的变化, 首年基准取历史最后一年
+        base_total = None
+        try:
+            if self.data is not None and len(self.data) > 0:
+                last_year = int(self.data['年份'].max())
+                last_year_data = self.data[self.data['年份'] == last_year]
+                if len(last_year_data) == 12:
+                    base_total = float(last_year_data['旅客运输量'].sum())
+                elif len(last_year_data) > 0:
+                    base_total = float(last_year_data['旅客运输量'].mean() * 12)
+        except Exception:
+            base_total = None
+        computed_growth = {}
+        prev_total = base_total
+        for year in sorted(yearly_totals.index):
+            total = float(yearly_totals[year])
+            if prev_total is not None and prev_total > 0:
+                computed_growth[int(year)] = (total - prev_total) / prev_total * 100
+            prev_total = total
+        # 有上一年的情况下用真实同比; 否则保留校准路径写入的调整幅度
+        if computed_growth:
+            self.growth_rates = computed_growth
 
         # 添加数据到表格
         for i, (date, value) in enumerate(forecast.items()):
@@ -2503,14 +3215,14 @@ class FinalForecastApp:
 
         self.forecast_ax.set_xlabel('日期', fontsize=label_size)
         self.forecast_ax.set_ylabel('旅客运输量', fontsize=label_size)
-        model_name = {
-            'ensemble': '融合模型',
-            'hw': 'Holt-Winters',
-            'sarima': 'SARIMA',
-            'kalman': '卡尔曼滤波'
-        }.get(self.model_var.get(), '融合模型')
+        model_name = self._model_display_name()
         mode = str(getattr(self, "model_mode_var", tk.StringVar(value="auto")).get() or "auto")
-        mode_text = "自动推荐" if mode == "auto" else "手动选择"
+        if mode == "manual":
+            mode_text = "手动选择"
+        elif getattr(self, "last_rec_info", None):
+            mode_text = "自动推荐"
+        else:
+            mode_text = "自动推荐未生效(数据不足)"
         title = f'旅客运输量预测 ({model_name} · {mode_text})'
         if getattr(self, "last_rec_info", None):
             title += f" · 回测推荐权重 HW {self.last_rec_info['weights'].get('hw', 0.5):.2f}/SA {self.last_rec_info['weights'].get('sarima', 0.5):.2f}"
@@ -2562,10 +3274,10 @@ class FinalForecastApp:
                     # 写入说明
                     df_description = pd.DataFrame({
                         '说明': [
-                            '数据来源：民航旅客运输量预测系统 V1.4',
+                            '数据来源：民航旅客运输量预测系统 V1.5',
                             f'导出时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
-                            f'预测模型：{self.model_var.get()}',
-                            f'年度增长率：{self.lunar_config["annual_growth_rate"] * 100:.2f}%',
+                            f'预测模型：{self._model_display_name()}',
+                            f'年度增长率：{self._current_growth_rate() * 100:.2f}%',
                             f'启用节假日效应：{"是" if self.holiday_var.get() else "否"}',
                             '注：春运天数基于农历春节日期计算；精选算法集合见“算法手册”',
                         ]
@@ -2620,12 +3332,12 @@ class FinalForecastApp:
                     if i == 0:
                         # 第一年，计算相对于基准的增长
                         growth_rate = self.growth_rates[year]
-                        target_growth = self.lunar_config['annual_growth_rate'] * 100
+                        target_growth = self._current_growth_rate() * 100
                         deviation = growth_rate - target_growth
                     else:
                         # 后续年份
                         growth_rate = self.growth_rates[year]
-                        target_growth = self.lunar_config['annual_growth_rate'] * 100
+                        target_growth = self._current_growth_rate() * 100
                         deviation = growth_rate - target_growth
 
                     growth_data.append({
@@ -2700,12 +3412,12 @@ class FinalForecastApp:
                             f'报告生成时间：{datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}',
                             f'历史数据量：{len(self.data)} 条',
                             f'预测期数：{len(self.forecast_data)} 个月',
-                            f'预测模型：{self.model_var.get()}',
-                            f'年度增长率：{self.lunar_config["annual_growth_rate"] * 100:.2f}%',
+                            f'预测模型：{self._model_display_name()}',
+                            f'年度增长率：{self._current_growth_rate() * 100:.2f}%',
                             '',
                             '报告特点：',
                             f'1. 春运窗口：春节前{int(self.holiday_cfg.get("spring_travel_before_days", 15))}天到春节后{int(self.holiday_cfg.get("spring_travel_after_days", 24))}天',
-                            f'2. 每年总旅客运输量环比增长{self.lunar_config["annual_growth_rate"] * 100:.2f}%',
+                            f'2. 每年总旅客运输量环比增长{self._current_growth_rate() * 100:.2f}%',
                             '3. 基于农历春节日期计算春运',
                             '4. 多模型融合优化预测精度'
                         ]
@@ -2726,7 +3438,7 @@ class FinalForecastApp:
                             growth_data.append({
                                 '年份': year,
                                 '实际增长率': f"{rate:.2f}%",
-                                '目标增长率': f"{self.lunar_config['annual_growth_rate'] * 100:.2f}%"
+                                '目标增长率': f"{self._current_growth_rate() * 100:.2f}%"
                             })
                         pd.DataFrame(growth_data).to_excel(writer, sheet_name='增长分析', index=False)
 
@@ -3028,14 +3740,26 @@ class FinalForecastApp:
         status_card.pack(fill=tk.X, padx=12, pady=6)
         cols = ("指标", "来源", "数据量", "最新日期", "最新值", "更新时间", "状态")
         self.admin_tree = ttk.Treeview(status_card, columns=cols, show="headings", height=3, style="Modern.Treeview")
+        scale = self._ui_scale()
         widths = {"指标": 120, "来源": 160, "数据量": 70, "最新日期": 100, "最新值": 100, "更新时间": 150, "状态": 70}
         for c in cols:
             self.admin_tree.heading(c, text=c)
-            self.admin_tree.column(c, width=widths[c], anchor=tk.CENTER)
+            self.admin_tree.column(c, width=max(56, int(widths[c] * scale)), anchor=tk.CENTER)
         vsb = ttk.Scrollbar(status_card, orient=tk.VERTICAL, command=self.admin_tree.yview, style="Modern.Vertical.TScrollbar")
         self.admin_tree.configure(yscrollcommand=vsb.set)
         self.admin_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=6)
         vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=6)
+        # 列宽随窗口自适应: 旧实现把 7 列写死 770px 且只有竖向滚动条,
+        # 窗口一窄就裁掉"数据来源/最新日期/最新值"等表头。
+        try:
+            self.admin_resizer = ColumnResizer(
+                self.admin_tree,
+                weights={"指标": 1.2, "来源": 1.6, "数据量": 0.7, "最新日期": 1.0,
+                         "最新值": 1.0, "更新时间": 1.5, "状态": 0.7},
+                min_width=56, max_width=320,
+            )
+        except Exception:
+            self.admin_resizer = None
 
         def refresh_status():
             try:
@@ -3071,8 +3795,7 @@ class FinalForecastApp:
         preview_card = card_frame(win, "指标趋势预览（近 5 年）")
         preview_card.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8.6, 3.6), sharex=True)
-        canvas = FigureCanvasTkAgg(fig, master=preview_card)
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        canvas = _embed_figure_canvas(preview_card, fig, min_height=300, padx=8, pady=6)
 
         def draw_preview():
             try:
@@ -3127,7 +3850,8 @@ class FinalForecastApp:
         draw_preview()
         # 几何：内嵌 matplotlib 画布的 req 尺寸(=figsize×dpi) 不代表真实内容需求,
         # 采用固定基础尺寸 + 屏幕约束 + 相对父窗口居中（预览图区 pack expand 自动伸缩）
-        _apply_geometry(win, 920, 720, parent=self.root, min_w=680, min_h=520)
+        _apply_geometry(win, 920, 720, parent=self.root, min_w=680, min_h=520,
+                        ui_scale=self._ui_scale(), ratio_w=0.62, ratio_h=0.72)
         self.update_status("管理控制台已打开")
 
     def _toggle_external(self):
@@ -3166,8 +3890,23 @@ class FinalForecastApp:
         left.pack(side=tk.LEFT, fill=tk.Y)
         list_tree = ttk.Treeview(left, columns=("name",), show="headings", height=8, style="Modern.Treeview")
         list_tree.heading("name", text="算法")
-        list_tree.column("name", width=240, anchor=tk.W)
-        list_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        # 列宽按真实文本测量（旧实现写死 240px，长算法名被截断且没有横向滚动条）
+        try:
+            font = self._fonts.get("tree") or tkfont.nametofont("TkDefaultFont")
+            measured = max(
+                [font.measure(str(m.get("name", ""))) for m in MANUALS]
+                + [font.measure(str(r.get("name", ""))) for r in REMOVED_NOTES]
+                + [0]
+            )
+            list_width = max(240, int(measured * 1.06) + 32)
+            list_width = min(list_width, max(260, int(win.winfo_screenwidth() * 0.42)))
+        except Exception:
+            list_width = max(240, int(240 * self._ui_scale()))
+        list_tree.column("name", width=list_width, minwidth=list_width, anchor=tk.W)
+        list_hsb = ttk.Scrollbar(left, orient=tk.HORIZONTAL, command=list_tree.xview)
+        list_tree.configure(xscrollcommand=list_hsb.set)
+        list_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=(6, 0))
+        list_hsb.pack(fill=tk.X, padx=6, pady=(0, 6))
         list_tree.tag_configure("removed", foreground=T_COLORS["danger"])
 
         # 右侧：手册内容
@@ -3209,7 +3948,8 @@ class FinalForecastApp:
 
         # 内容自适应：先布局再按实际需求计算尺寸并居中
         win.update_idletasks()
-        _content_fit_geometry(win, self.root, 1000, 740, min_w=720, min_h=520)
+        _content_fit_geometry(win, self.root, 1000, 740, min_w=720, min_h=520,
+                              ui_scale=self._ui_scale(), ratio_w=0.66, ratio_h=0.78)
 
     # ========== 马尔可夫状态转移分析 ==========
 
@@ -3227,7 +3967,8 @@ class FinalForecastApp:
 
             win = tk.Toplevel(self.root)
             win.title("状态转移分析（马尔可夫情景分析）")
-            _apply_geometry(win, 880, 620, parent=self.root, min_w=680, min_h=480)
+            _apply_geometry(win, 880, 620, parent=self.root, min_w=680, min_h=480,
+                            ui_scale=self._ui_scale(), ratio_w=0.50, ratio_h=0.58)
             win.configure(bg=T_COLORS["bg_window"])
             win.transient(self.root)
 
@@ -3264,8 +4005,7 @@ class FinalForecastApp:
             fig_card = card_frame(mid, "未来 12 个月状态概率")
             fig_card.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(8, 0))
             fig, ax = plt.subplots(figsize=(5.2, 3.2))
-            canvas = FigureCanvasTkAgg(fig, master=fig_card)
-            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+            canvas = _embed_figure_canvas(fig_card, fig, min_height=240, padx=6, pady=6)
             dist = result["forecast_distribution"]
             months = result["month_labels"]
             x = list(range(len(months)))
@@ -3345,8 +4085,7 @@ def main():
 
             win = tk.Tk()
             win.title("正在安装依赖")
-            win.geometry("520x160")
-            win.resizable(False, False)
+            _apply_geometry(win, 560, 180, parent=None, min_w=460, min_h=150)
             info = tk.Label(win, text="正在安装依赖，请稍候…", anchor="w", justify=tk.LEFT)
             info.pack(fill=tk.X, padx=12, pady=(14, 8))
             detail = tk.Label(

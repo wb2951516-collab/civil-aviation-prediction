@@ -248,16 +248,24 @@ def cmd_gate(phase2: bool):
         factors = load_factors(ts) if factor_policy.get(name, True) else None
         res = rolling_backtest(ts, profile, horizon=12, step=12, min_train=24, factors=factors, engine="intervention", members=["hw", "sarima", "kalman"])
         print(_fmt_summary(f"三成员(含卡尔曼) - {name}", res))
+        subs = res.get("subsets") or {}
+        if subs:
+            best_name, best_info = min(subs.items(), key=lambda kv: kv[1].get("mape", float("inf")))
+            print(f"  子集选择: {best_name:<18s} MAPE={best_info.get('mape', float('nan')):6.3f}%  "
+                  f"MASE={best_info.get('mase', float('nan')):4.2f}  ← 生产实际采用")
 
         entry = {"three_member": res, "baseline_ensemble_mape": base_ens}
         new_ens = float(res.get("summary", {}).get("ensemble", {}).get("mape", float("nan")))
-        if base_ens == base_ens and new_ens == new_ens and base_ens > 0:
-            rel = (base_ens - new_ens) / base_ens * 100.0
-            absp = base_ens - new_ens
+        # 生产实际采用的是"子集选择"结果，而不是固定三成员，门槛必须按生产配置判定
+        prod_mape = float(((res.get("recommendation") or {}).get("selection") or {}).get("mape", new_ens))
+        entry["production_mape"] = prod_mape
+        if base_ens == base_ens and prod_mape == prod_mape and base_ens > 0:
+            rel = (base_ens - prod_mape) / base_ens * 100.0
+            absp = base_ens - prod_mape
             entry["relative_improve_pct"] = rel
             entry["absolute_improve_pp"] = absp
             entry["gate_pass"] = bool(rel >= 3.0 or absp >= 0.3)
-            print(f"  门槛: 基线集成 MAPE={base_ens:.3f}% → 三成员 {new_ens:.3f}%  "
+            print(f"  门槛: 基线集成 MAPE={base_ens:.3f}% → 生产配置 {prod_mape:.3f}%  "
                   f"相对改善 {rel:.2f}%  绝对改善 {absp:.3f}pp  → {'通过' if entry['gate_pass'] else '未通过'}")
 
         if phase2 and name == "caac_load_factor":

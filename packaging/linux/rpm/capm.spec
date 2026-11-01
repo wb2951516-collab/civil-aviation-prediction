@@ -1,5 +1,5 @@
 Name: capm
-Version: 1.4.0
+Version: 1.5.0
 Release: 1%{?dist}
 Summary: CAPM 民航旅客运输量预测系统
 License: MIT
